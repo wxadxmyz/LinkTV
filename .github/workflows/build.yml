@@ -32,13 +32,21 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Accept licenses and install SDK packages
+      - name: Prepare Android SDK
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" > /dev/null
+          set -e
+          # ubuntu-latest 镜像已预装 Android SDK；直接用自带 sdkmanager，
+          # 避免第三方 setup-android action 去安装已下架的 "tools" 包而失败
+          SDKROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER=$(find "$SDKROOT/cmdline-tools" -name sdkmanager -type f 2>/dev/null | head -n 1)
+          [ -n "$SDKMANAGER" ] || SDKMANAGER=$(command -v sdkmanager)
+          echo "SDKROOT=$SDKROOT"
+          echo "sdkmanager=$SDKMANAGER"
+          test -n "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_HOME=$SDKROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDKROOT" >> "$GITHUB_ENV"
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
