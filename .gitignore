@@ -1,0 +1,25 @@
+# ---- Gradle / Android ----
+.gradle/
+build/
+**/build/
+local.properties
+*.iml
+.idea/
+.cxx/
+captures/
+.externalNativeBuild
+
+# ---- 构建产物（由 GitHub Actions 生成，不入库）----
+*.apk
+*.ap_
+*.aab
+
+# ---- 临时文件 ----
+branding/_preview.png
+*.log
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+
+# 注意：不要忽略 *.jar —— gradle-wrapper.jar 必须提交

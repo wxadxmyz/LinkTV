@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LinkTV · UI 预览</title>
+<link rel="icon" type="image/png" href="favicon.png" />
+<style>
+  :root{
+    --bg:#070a12; --bg2:#0e1320; --card:#161d2e; --card2:#1d2740;
+    --line:rgba(255,255,255,.08); --txt:#eef2fb; --dim:#8b97b3;
+    --acc:#ff3b41; --acc2:#3b82f6; --gold:#ffd24d; --ok:#22d3a6;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:radial-gradient(1200px 700px at 70% -10%,#16203a 0%,var(--bg) 60%);
+    color:var(--txt); font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    overflow:hidden; letter-spacing:.3px; touch-action:none;
+  }
+  /* 始终横屏：竖屏时整体旋转 90°，转动手机即为横版电视界面 */
+  .screen{display:flex;flex-direction:column;width:100vw;height:100vh;padding:28px 34px 18px}
+  @media screen and (orientation:portrait){
+    .screen{
+      width:100vh; height:100vw;
+      position:absolute; top:0; left:100vw;
+      transform:rotate(90deg); transform-origin:0 0;
+    }
+  }
+
+  /* 顶部状态栏 */
+  .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}
+  .brand{display:flex;align-items:center;gap:12px;font-size:26px;font-weight:800}
+  .brand .dot{width:14px;height:14px;border-radius:50%;background:var(--acc);box-shadow:0 0 14px var(--acc)}
+  .brand small{font-size:13px;color:var(--dim);font-weight:500;margin-left:6px}
+  .status{display:flex;align-items:center;gap:18px;color:var(--dim);font-size:15px}
+  .status .live{display:flex;align-items:center;gap:7px;color:var(--ok);font-weight:600}
+  .status .live i{width:9px;height:9px;border-radius:50%;background:var(--ok);animation:pulse 1.4s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  .status .clock{font-variant-numeric:tabular-nums;font-size:17px;color:var(--txt)}
+  .status .sig{display:flex;gap:3px;align-items:flex-end}
+  .status .sig span{width:4px;background:var(--txt);border-radius:2px}
+  .status .sig span:nth-child(1){height:7px;opacity:.4}
+  .status .sig span:nth-child(2){height:11px;opacity:.6}
+  .status .sig span:nth-child(3){height:15px;opacity:.8}
+  .status .sig span:nth-child(4){height:19px}
+
+  /* 主体 */
+  .body{display:flex;gap:26px;flex:1;min-height:0}
+
+  /* 左侧分类（可滚动，避免矮屏被裁切） */
+  .side{width:clamp(168px,17vw,230px);display:flex;flex-direction:column;gap:9px;
+    overflow-y:auto;flex-shrink:0}
+  .cat{padding:13px 16px;border-radius:14px;background:var(--card);color:var(--dim);
+    font-size:17px;font-weight:600;display:flex;align-items:center;gap:12px;cursor:pointer;
+    border:2px solid transparent;transition:.15s;flex-shrink:0}
+  .cat .ic{font-size:21px}
+  .cat .cnt{margin-left:auto;color:var(--dim);font-size:13px;font-weight:500}
+  .cat.active{background:linear-gradient(90deg,var(--acc),#ff6b50);color:#fff;border-color:transparent;
+    box-shadow:0 8px 22px rgba(255,59,65,.35)}
+  .cat.active .cnt{color:rgba(255,255,255,.85)}
+  .cat.focus{outline:none;border-color:var(--gold);transform:scale(1.03)}
+
+  /* 右侧内容 */
+  .content{flex:1;display:flex;flex-direction:column;gap:20px;min-width:0}
+
+  /* Hero 正在播放 */
+  .hero{display:flex;gap:22px;background:var(--card);border-radius:20px;padding:22px;
+    border:1px solid var(--line);position:relative;overflow:hidden;flex-shrink:0}
+  .hero .poster{flex:0 0 clamp(200px,26vw,320px);height:clamp(120px,22vh,180px);border-radius:14px;position:relative;overflow:hidden;
+    display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#1b2742,#0c1322)}
+  .hero .poster .big{font-size:60px;font-weight:800;color:#fff;opacity:.92;text-shadow:0 4px 20px rgba(0,0,0,.5)}
+  .hero .poster .play{position:absolute;width:64px;height:64px;border-radius:50%;background:rgba(255,255,255,.16);
+    display:flex;align-items:center;justify-content:center;font-size:26px;backdrop-filter:blur(4px)}
+  .hero .poster .tag{position:absolute;top:10px;left:10px;background:var(--acc);color:#fff;
+    font-size:12px;font-weight:700;padding:3px 9px;border-radius:6px}
+  .hero .meta{flex:1;display:flex;flex-direction:column;justify-content:center;gap:12px;min-width:0}
+  .hero .meta .name{font-size:34px;font-weight:800}
+  .hero .meta .sub{color:var(--dim);font-size:16px}
+  .hero .meta .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:4px}
+  .pill{background:var(--card2);border:1px solid var(--line);color:var(--txt);font-size:13px;
+    padding:6px 12px;border-radius:20px}
+  .pill.hd{color:var(--gold);border-color:rgba(255,210,77,.4)}
+  .pill.ok{color:var(--ok);border-color:rgba(34,211,166,.4)}
+
+  /* 频道网格 */
+  .grid-title{font-size:18px;font-weight:700;color:var(--dim);margin:2px 0 -4px;flex-shrink:0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(115px,1fr));gap:14px;
+    overflow:auto;padding:4px 2px 8px;align-content:start}
+  /* 省份分区标题（跨整行） */
+  .prov-head{grid-column:1/-1;color:var(--gold);font-size:15px;font-weight:700;
+    padding:14px 4px 6px;border-bottom:1px solid var(--line);margin-bottom:2px}
+  .prov-head .pn{color:var(--txt)}
+  .prov-head .pc{color:var(--dim);font-weight:500;font-size:13px;margin-left:8px}
+  .ch{background:var(--card);border-radius:16px;padding:14px 10px;display:flex;flex-direction:column;
+    align-items:center;gap:10px;cursor:pointer;border:2px solid transparent;transition:.12s;min-height:108px;justify-content:center}
+  .ch .logo{width:58px;height:58px;border-radius:14px;display:flex;align-items:center;justify-content:center;
+    font-size:17px;font-weight:800;color:#fff;box-shadow:0 6px 16px rgba(0,0,0,.35)}
+  .ch .nm{font-size:14px;font-weight:600;text-align:center;line-height:1.25}
+  .ch.focus{outline:none;border-color:var(--gold);transform:translateY(-4px) scale(1.04);
+    background:var(--card2);box-shadow:0 14px 30px rgba(0,0,0,.45)}
+  .ch.playing .logo{box-shadow:0 0 0 3px var(--ok),0 6px 16px rgba(0,0,0,.35)}
+
+  /* 底部 EPG 条 */
+  .epg{display:flex;gap:14px;align-items:center;background:var(--card);border-radius:14px;
+    padding:14px 20px;border:1px solid var(--line);flex-shrink:0}
+  .epg .lab{color:var(--acc);font-weight:700;font-size:14px;white-space:nowrap}
+  .epg .now{font-weight:700;font-size:16px}
+  .epg .next{color:var(--dim);font-size:15px}
+  .epg .next b{color:var(--txt)}
+  .epg .bar{flex:1;height:6px;background:var(--card2);border-radius:4px;position:relative;overflow:hidden}
+  .epg .bar i{position:absolute;left:0;top:0;bottom:0;width:38%;background:var(--acc);border-radius:4px}
+
+  .hint{position:fixed;bottom:18px;right:34px;color:var(--dim);font-size:13px;background:rgba(0,0,0,.35);
+    padding:8px 14px;border-radius:10px}
+  .hint b{color:var(--gold)}
+
+  /* 手机横屏（矮高度）时压缩间距，避免溢出 */
+  @media (max-height:480px){
+    .screen{padding:14px 18px 10px}
+    .topbar{margin-bottom:12px}
+    .body{gap:16px}
+    .hero{padding:14px;gap:14px}
+    .hero .meta .name{font-size:26px}
+    .ch{min-height:84px;padding:10px 8px}
+    .ch .logo{width:46px;height:46px;font-size:15px}
+    .grid{gap:10px}
+    .prov-head{padding:9px 4px 4px}
+  }
+</style>
+</head>
+<body>
+<div class="screen">
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span>Link<span style="color:var(--acc)">TV</span> <small>· 预览版</small></div>
+    <div class="status">
+      <span class="live"><i></i> 直播中</span>
+      <span class="sig"><span></span><span></span><span></span><span></span></span>
+      <span id="date">--</span>
+      <span class="clock" id="clock">00:00:00</span>
+    </div>
+  </div>
+
+  <div class="body">
+    <div class="side" id="side"></div>
+    <div class="content">
+      <div class="hero">
+        <div class="poster">
+          <span class="tag">LIVE</span>
+          <span class="big" id="heroBig">C1</span>
+          <div class="play">▶</div>
+        </div>
+        <div class="meta">
+          <div class="name" id="heroName">CCTV-1 综合</div>
+          <div class="sub" id="heroSub">中央电视台综合频道 · 高清</div>
+          <div class="row">
+            <span class="pill hd">1080P</span>
+            <span class="pill ok">信号正常</span>
+            <span class="pill" id="heroCat">央视</span>
+            <span class="pill">HLS</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-title" id="gridTitle">全部频道</div>
+      <div class="grid" id="grid"></div>
+
+      <div class="epg">
+        <span class="lab">正在播出</span>
+        <span class="now" id="epgNow">新闻联播</span>
+        <div class="bar"><i></i></div>
+        <span class="next">接下来 · <b id="epgNext">天气预报</b></span>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="hint">遥控：<b>↑↓</b> 选频道 · <b>←→</b> 跨省跳转 / 切分类 · <b>Enter</b> 播放 · <b>Esc</b> 返回</div>
+
+<script>
+const GROUPS = [{"name":"全部","ic":"📡","ch":[{"n":"CCTV-1 综合","s":"C1","c":"#e23b3b"},{"n":"CCTV-2 财经","s":"C2","c":"#e23b3b"},{"n":"CCTV-3 综艺","s":"C3","c":"#e23b3b"},{"n":"CCTV-4 中文国际","s":"C4","c":"#e23b3b"},{"n":"CCTV-5 体育","s":"C5","c":"#e23b3b"},{"n":"CCTV-5+ 体育赛事","s":"C5","c":"#e23b3b"},{"n":"CCTV-6 电影","s":"C6","c":"#e23b3b"},{"n":"CCTV-7 国防军事","s":"C7","c":"#e23b3b"},{"n":"CCTV-8 电视剧","s":"C8","c":"#e23b3b"},{"n":"CCTV-9 纪录","s":"C9","c":"#e23b3b"},{"n":"CCTV-10 科教","s":"C10","c":"#e23b3b"},{"n":"CCTV-11 戏曲","s":"C11","c":"#e23b3b"},{"n":"CCTV-12 社会与法","s":"C12","c":"#e23b3b"},{"n":"CCTV-13 新闻","s":"C13","c":"#e23b3b"},{"n":"CCTV-14 少儿","s":"C14","c":"#e23b3b"},{"n":"CCTV-15 音乐","s":"C15","c":"#e23b3b"},{"n":"CCTV-16 奥林匹克","s":"C16","c":"#e23b3b"},{"n":"CCTV-17 农业农村","s":"C17","c":"#e23b3b"},{"n":"CCTV-4 欧洲","s":"C4","c":"#e23b3b"},{"n":"CCTV-4 美洲","s":"C4","c":"#e23b3b"},{"n":"北京卫视","s":"北京","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京新闻","s":"新闻","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京文艺","s":"文艺","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京影视","s":"影视","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京科教","s":"科教","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京体育","s":"体育","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京生活","s":"生活","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京少儿","s":"少儿","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京卡酷少儿","s":"卡酷","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京国际","s":"国际","c":"#d5212a","p":"北京","r":"华北"},{"n":"天津卫视","s":"天津","c":"#dc2626","p":"天津","r":"华北"},{"n":"天津新闻","s":"新闻","c":"#dc2626","p":"天津","r":"华北"},{"n":"天津文艺","s":"文艺","c":"#dc2626","p":"天津","r":"华北"},{"n":"天津都市","s":"都市","c":"#dc2626","p":"天津","r":"华北"},{"n":"河北卫视","s":"河北","c":"#2563eb","p":"河北","r":"华北"},{"n":"河北经济","s":"经济","c":"#2563eb","p":"河北","r":"华北"},{"n":"河北农民","s":"农民","c":"#2563eb","p":"河北","r":"华北"},{"n":"石家庄新闻","s":"石家","c":"#2563eb","p":"河北","r":"华北"},{"n":"山西卫视","s":"山西","c":"#0891b2","p":"山西","r":"华北"},{"n":"山西科教","s":"科教","c":"#0891b2","p":"山西","r":"华北"},{"n":"太原新闻","s":"太原","c":"#0891b2","p":"山西","r":"华北"},{"n":"内蒙古卫视","s":"内蒙","c":"#16a34a","p":"内蒙古","r":"华北"},{"n":"内蒙古蒙语","s":"蒙语","c":"#16a34a","p":"内蒙古","r":"华北"},{"n":"呼和浩特新闻","s":"呼和","c":"#16a34a","p":"内蒙古","r":"华北"},{"n":"辽宁卫视","s":"辽宁","c":"#0d9488","p":"辽宁","r":"东北"},{"n":"辽宁都市","s":"都市","c":"#0d9488","p":"辽宁","r":"东北"},{"n":"大连新闻","s":"大连","c":"#0d9488","p":"辽宁","r":"东北"},{"n":"吉林卫视","s":"吉林","c":"#7c3aed","p":"吉林","r":"东北"},{"n":"吉林乡村","s":"乡村","c":"#7c3aed","p":"吉林","r":"东北"},{"n":"长春新闻","s":"长春","c":"#7c3aed","p":"吉林","r":"东北"},{"n":"黑龙江卫视","s":"黑龙","c":"#0284c7","p":"黑龙江","r":"东北"},{"n":"黑龙江都市","s":"都市","c":"#0284c7","p":"黑龙江","r":"东北"},{"n":"哈尔滨新闻","s":"哈尔","c":"#0284c7","p":"黑龙江","r":"东北"},{"n":"东方卫视","s":"上海","c":"#0369a1","p":"上海","r":"华东"},{"n":"上海新闻综合","s":"新闻","c":"#0369a1","p":"上海","r":"华东"},{"n":"上海娱乐","s":"娱乐","c":"#0369a1","p":"上海","r":"华东"},{"n":"上海戏剧","s":"戏剧","c":"#0369a1","p":"上海","r":"华东"},{"n":"上海纪实","s":"纪实","c":"#0369a1","p":"上海","r":"华东"},{"n":"上海东方影视","s":"东方","c":"#0369a1","p":"上海","r":"华东"},{"n":"江苏卫视","s":"江苏","c":"#15803d","p":"江苏","r":"华东"},{"n":"江苏城市","s":"城市","c":"#15803d","p":"江苏","r":"华东"},{"n":"江苏教育","s":"教育","c":"#15803d","p":"江苏","r":"华东"},{"n":"南京新闻","s":"南京","c":"#15803d","p":"江苏","r":"华东"},{"n":"浙江卫视","s":"浙江","c":"#1d4ed8","p":"浙江","r":"华东"},{"n":"浙江民生休闲","s":"民生","c":"#1d4ed8","p":"浙江","r":"华东"},{"n":"浙江少儿","s":"少儿","c":"#1d4ed8","p":"浙江","r":"华东"},{"n":"杭州综合","s":"杭州","c":"#1d4ed8","p":"浙江","r":"华东"},{"n":"安徽卫视","s":"安徽","c":"#1e40af","p":"安徽","r":"华东"},{"n":"安徽经济","s":"经济","c":"#1e40af","p":"安徽","r":"华东"},{"n":"安徽公共","s":"公共","c":"#1e40af","p":"安徽","r":"华东"},{"n":"福建卫视","s":"福建","c":"#0e7490","p":"福建","r":"华东"},{"n":"东南卫视","s":"福建","c":"#0e7490","p":"福建","r":"华东"},{"n":"福建新闻","s":"新闻","c":"#0e7490","p":"福建","r":"华东"},{"n":"厦门卫视","s":"福建","c":"#0e7490","p":"福建","r":"华东"},{"n":"江西卫视","s":"江西","c":"#0f766e","p":"江西","r":"华东"},{"n":"江西都市","s":"都市","c":"#0f766e","p":"江西","r":"华东"},{"n":"南昌新闻","s":"南昌","c":"#0f766e","p":"江西","r":"华东"},{"n":"山东卫视","s":"山东","c":"#b91c1c","p":"山东","r":"华东"},{"n":"山东齐鲁","s":"齐鲁","c":"#b91c1c","p":"山东","r":"华东"},{"n":"山东农科","s":"农科","c":"#b91c1c","p":"山东","r":"华东"},{"n":"济南新闻","s":"济南","c":"#b91c1c","p":"山东","r":"华东"},{"n":"河南卫视","s":"河南","c":"#c2410c","p":"河南","r":"华中"},{"n":"河南都市","s":"都市","c":"#c2410c","p":"河南","r":"华中"},{"n":"河南新闻","s":"新闻","c":"#c2410c","p":"河南","r":"华中"},{"n":"湖北卫视","s":"湖北","c":"#4338ca","p":"湖北","r":"华中"},{"n":"湖北综合","s":"综合","c":"#4338ca","p":"湖北","r":"华中"},{"n":"武汉新闻","s":"武汉","c":"#4338ca","p":"湖北","r":"华中"},{"n":"湖南卫视","s":"湖南","c":"#db2777","p":"湖南","r":"华中"},{"n":"湖南经视","s":"经视","c":"#db2777","p":"湖南","r":"华中"},{"n":"湖南娱乐","s":"娱乐","c":"#db2777","p":"湖南","r":"华中"},{"n":"湖南都市","s":"都市","c":"#db2777","p":"湖南","r":"华中"},{"n":"长沙新闻","s":"长沙","c":"#db2777","p":"湖南","r":"华中"},{"n":"广东卫视","s":"广东","c":"#1d4ed8","p":"广东","r":"华南"},{"n":"广东珠江","s":"珠江","c":"#1d4ed8","p":"广东","r":"华南"},{"n":"广东新闻","s":"新闻","c":"#1d4ed8","p":"广东","r":"华南"},{"n":"广州综合","s":"广州","c":"#1d4ed8","p":"广东","r":"华南"},{"n":"深圳卫视","s":"广东","c":"#1d4ed8","p":"广东","r":"华南"},{"n":"深圳都市","s":"深圳","c":"#1d4ed8","p":"广东","r":"华南"},{"n":"深圳财经","s":"深圳","c":"#1d4ed8","p":"广东","r":"华南"},{"n":"广西卫视","s":"广西","c":"#15803d","p":"广西","r":"华南"},{"n":"广西都市","s":"都市","c":"#15803d","p":"广西","r":"华南"},{"n":"南宁新闻","s":"南宁","c":"#15803d","p":"广西","r":"华南"},{"n":"海南卫视","s":"海南","c":"#0891b2","p":"海南","r":"华南"},{"n":"海南新闻","s":"新闻","c":"#0891b2","p":"海南","r":"华南"},{"n":"海口新闻","s":"海口","c":"#0891b2","p":"海南","r":"华南"},{"n":"重庆卫视","s":"重庆","c":"#be123c","p":"重庆","r":"西南"},{"n":"重庆新闻","s":"新闻","c":"#be123c","p":"重庆","r":"西南"},{"n":"重庆影视","s":"影视","c":"#be123c","p":"重庆","r":"西南"},{"n":"四川卫视","s":"四川","c":"#15803d","p":"四川","r":"西南"},{"n":"四川文化旅游","s":"文化","c":"#15803d","p":"四川","r":"西南"},{"n":"成都新闻","s":"成都","c":"#15803d","p":"四川","r":"西南"},{"n":"贵州卫视","s":"贵州","c":"#0e7490","p":"贵州","r":"西南"},{"n":"贵州新闻","s":"新闻","c":"#0e7490","p":"贵州","r":"西南"},{"n":"贵阳新闻","s":"贵阳","c":"#0e7490","p":"贵州","r":"西南"},{"n":"云南卫视","s":"云南","c":"#0f766e","p":"云南","r":"西南"},{"n":"云南都市","s":"都市","c":"#0f766e","p":"云南","r":"西南"},{"n":"昆明新闻","s":"昆明","c":"#0f766e","p":"云南","r":"西南"},{"n":"西藏卫视","s":"西藏","c":"#7c2d12","p":"西藏","r":"西南"},{"n":"西藏藏语","s":"藏语","c":"#7c2d12","p":"西藏","r":"西南"},{"n":"拉萨新闻","s":"拉萨","c":"#7c2d12","p":"西藏","r":"西南"},{"n":"陕西卫视","s":"陕西","c":"#b45309","p":"陕西","r":"西北"},{"n":"陕西新闻","s":"新闻","c":"#b45309","p":"陕西","r":"西北"},{"n":"西安新闻","s":"西安","c":"#b45309","p":"陕西","r":"西北"},{"n":"甘肃卫视","s":"甘肃","c":"#047857","p":"甘肃","r":"西北"},{"n":"甘肃都市","s":"都市","c":"#047857","p":"甘肃","r":"西北"},{"n":"兰州新闻","s":"兰州","c":"#047857","p":"甘肃","r":"西北"},{"n":"青海卫视","s":"青海","c":"#0d9488","p":"青海","r":"西北"},{"n":"青海新闻","s":"新闻","c":"#0d9488","p":"青海","r":"西北"},{"n":"西宁新闻","s":"西宁","c":"#0d9488","p":"青海","r":"西北"},{"n":"宁夏卫视","s":"宁夏","c":"#b91c1c","p":"宁夏","r":"西北"},{"n":"宁夏公共","s":"公共","c":"#b91c1c","p":"宁夏","r":"西北"},{"n":"银川新闻","s":"银川","c":"#b91c1c","p":"宁夏","r":"西北"},{"n":"新疆卫视","s":"新疆","c":"#15803d","p":"新疆","r":"西北"},{"n":"新疆维语","s":"维语","c":"#15803d","p":"新疆","r":"西北"},{"n":"乌鲁木齐新闻","s":"乌鲁","c":"#15803d","p":"新疆","r":"西北"},{"n":"翡翠台","s":"翡翠","c":"#111827","p":"香港","r":"港澳台"},{"n":"明珠台","s":"明珠","c":"#111827","p":"香港","r":"港澳台"},{"n":"无线新闻台","s":"无线","c":"#111827","p":"香港","r":"港澳台"},{"n":"凤凰卫视中文","s":"香港","c":"#111827","p":"香港","r":"港澳台"},{"n":"凤凰卫视资讯","s":"香港","c":"#111827","p":"香港","r":"港澳台"},{"n":"澳广视","s":"澳广","c":"#9a3412","p":"澳门","r":"港澳台"},{"n":"澳门综艺","s":"综艺","c":"#9a3412","p":"澳门","r":"港澳台"},{"n":"台视","s":"台视","c":"#1d4ed8","p":"台湾","r":"港澳台"},{"n":"中视","s":"中视","c":"#1d4ed8","p":"台湾","r":"港澳台"},{"n":"华视","s":"华视","c":"#1d4ed8","p":"台湾","r":"港澳台"},{"n":"民视","s":"民视","c":"#1d4ed8","p":"台湾","r":"港澳台"}]},{"name":"央视","ic":"📺","ch":[{"n":"CCTV-1 综合","s":"C1","c":"#e23b3b"},{"n":"CCTV-2 财经","s":"C2","c":"#e23b3b"},{"n":"CCTV-3 综艺","s":"C3","c":"#e23b3b"},{"n":"CCTV-4 中文国际","s":"C4","c":"#e23b3b"},{"n":"CCTV-5 体育","s":"C5","c":"#e23b3b"},{"n":"CCTV-5+ 体育赛事","s":"C5","c":"#e23b3b"},{"n":"CCTV-6 电影","s":"C6","c":"#e23b3b"},{"n":"CCTV-7 国防军事","s":"C7","c":"#e23b3b"},{"n":"CCTV-8 电视剧","s":"C8","c":"#e23b3b"},{"n":"CCTV-9 纪录","s":"C9","c":"#e23b3b"},{"n":"CCTV-10 科教","s":"C10","c":"#e23b3b"},{"n":"CCTV-11 戏曲","s":"C11","c":"#e23b3b"},{"n":"CCTV-12 社会与法","s":"C12","c":"#e23b3b"},{"n":"CCTV-13 新闻","s":"C13","c":"#e23b3b"},{"n":"CCTV-14 少儿","s":"C14","c":"#e23b3b"},{"n":"CCTV-15 音乐","s":"C15","c":"#e23b3b"},{"n":"CCTV-16 奥林匹克","s":"C16","c":"#e23b3b"},{"n":"CCTV-17 农业农村","s":"C17","c":"#e23b3b"},{"n":"CCTV-4 欧洲","s":"C4","c":"#e23b3b"},{"n":"CCTV-4 美洲","s":"C4","c":"#e23b3b"}]},{"name":"卫视","ic":"🛰️","ch":[{"n":"北京卫视","s":"北京","c":"#d5212a","p":"北京","r":"华北"},{"n":"天津卫视","s":"天津","c":"#dc2626","p":"天津","r":"华北"},{"n":"河北卫视","s":"河北","c":"#2563eb","p":"河北","r":"华北"},{"n":"山西卫视","s":"山西","c":"#0891b2","p":"山西","r":"华北"},{"n":"内蒙古卫视","s":"内蒙","c":"#16a34a","p":"内蒙古","r":"华北"},{"n":"辽宁卫视","s":"辽宁","c":"#0d9488","p":"辽宁","r":"东北"},{"n":"吉林卫视","s":"吉林","c":"#7c3aed","p":"吉林","r":"东北"},{"n":"黑龙江卫视","s":"黑龙","c":"#0284c7","p":"黑龙江","r":"东北"},{"n":"东方卫视","s":"上海","c":"#0369a1","p":"上海","r":"华东"},{"n":"江苏卫视","s":"江苏","c":"#15803d","p":"江苏","r":"华东"},{"n":"浙江卫视","s":"浙江","c":"#1d4ed8","p":"浙江","r":"华东"},{"n":"安徽卫视","s":"安徽","c":"#1e40af","p":"安徽","r":"华东"},{"n":"福建卫视","s":"福建","c":"#0e7490","p":"福建","r":"华东"},{"n":"东南卫视","s":"福建","c":"#0e7490","p":"福建","r":"华东"},{"n":"厦门卫视","s":"福建","c":"#0e7490","p":"福建","r":"华东"},{"n":"江西卫视","s":"江西","c":"#0f766e","p":"江西","r":"华东"},{"n":"山东卫视","s":"山东","c":"#b91c1c","p":"山东","r":"华东"},{"n":"河南卫视","s":"河南","c":"#c2410c","p":"河南","r":"华中"},{"n":"湖北卫视","s":"湖北","c":"#4338ca","p":"湖北","r":"华中"},{"n":"湖南卫视","s":"湖南","c":"#db2777","p":"湖南","r":"华中"},{"n":"广东卫视","s":"广东","c":"#1d4ed8","p":"广东","r":"华南"},{"n":"深圳卫视","s":"广东","c":"#1d4ed8","p":"广东","r":"华南"},{"n":"广西卫视","s":"广西","c":"#15803d","p":"广西","r":"华南"},{"n":"海南卫视","s":"海南","c":"#0891b2","p":"海南","r":"华南"},{"n":"重庆卫视","s":"重庆","c":"#be123c","p":"重庆","r":"西南"},{"n":"四川卫视","s":"四川","c":"#15803d","p":"四川","r":"西南"},{"n":"贵州卫视","s":"贵州","c":"#0e7490","p":"贵州","r":"西南"},{"n":"云南卫视","s":"云南","c":"#0f766e","p":"云南","r":"西南"},{"n":"西藏卫视","s":"西藏","c":"#7c2d12","p":"西藏","r":"西南"},{"n":"陕西卫视","s":"陕西","c":"#b45309","p":"陕西","r":"西北"},{"n":"甘肃卫视","s":"甘肃","c":"#047857","p":"甘肃","r":"西北"},{"n":"青海卫视","s":"青海","c":"#0d9488","p":"青海","r":"西北"},{"n":"宁夏卫视","s":"宁夏","c":"#b91c1c","p":"宁夏","r":"西北"},{"n":"新疆卫视","s":"新疆","c":"#15803d","p":"新疆","r":"西北"},{"n":"凤凰卫视中文","s":"香港","c":"#111827","p":"香港","r":"港澳台"},{"n":"凤凰卫视资讯","s":"香港","c":"#111827","p":"香港","r":"港澳台"}]},{"name":"地方台","ic":"🏙️","ch":[{"n":"北京卫视","s":"北京","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京新闻","s":"新闻","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京文艺","s":"文艺","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京影视","s":"影视","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京科教","s":"科教","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京体育","s":"体育","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京生活","s":"生活","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京少儿","s":"少儿","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京卡酷少儿","s":"卡酷","c":"#d5212a","p":"北京","r":"华北"},{"n":"北京国际","s":"国际","c":"#d5212a","p":"北京","r":"华北"},{"n":"天津卫视","s":"天津","c":"#dc2626","p":"天津","r":"华北"},{"n":"天津新闻","s":"新闻","c":"#dc2626","p":"天津","r":"华北"},{"n":"天津文艺","s":"文艺","c":"#dc2626","p":"天津","r":"华北"},{"n":"天津都市","s":"都市","c":"#dc2626","p":"天津","r":"华北"},{"n":"河北卫视","s":"河北","c":"#2563eb","p":"河北","r":"华北"},{"n":"河北经济","s":"经济","c":"#2563eb","p":"河北","r":"华北"},{"n":"河北农民","s":"农民","c":"#2563eb","p":"河北","r":"华北"},{"n":"石家庄新闻","s":"石家","c":"#2563eb","p":"河北","r":"华北"},{"n":"山西卫视","s":"山西","c":"#0891b2","p":"山西","r":"华北"},{"n":"山西科教","s":"科教","c":"#0891b2","p":"山西","r":"华北"},{"n":"太原新闻","s":"太原","c":"#0891b2","p":"山西","r":"华北"},{"n":"内蒙古卫视","s":"内蒙","c":"#16a34a","p":"内蒙古","r":"华北"},{"n":"内蒙古蒙语","s":"蒙语","c":"#16a34a","p":"内蒙古","r":"华北"},{"n":"呼和浩特新闻","s":"呼和","c":"#16a34a","p":"内蒙古","r":"华北"},{"n":"辽宁卫视","s":"辽宁","c":"#0d9488","p":"辽宁","r":"东北"},{"n":"辽宁都市","s":"都市","c":"#0d9488","p":"辽宁","r":"东北"},{"n":"大连新闻","s":"大连","c":"#0d9488","p":"辽宁","r":"东北"},{"n":"吉林卫视","s":"吉林","c":"#7c3aed","p":"吉林","r":"东北"},{"n":"吉林乡村","s":"乡村","c":"#7c3aed","p":"吉林","r":"东北"},{"n":"长春新闻","s":"长春","c":"#7c3aed","p":"吉林","r":"东北"},{"n":"黑龙江卫视","s":"黑龙","c":"#0284c7","p":"黑龙江","r":"东北"},{"n":"黑龙江都市","s":"都市","c":"#0284c7","p":"黑龙江","r":"东北"},{"n":"哈尔滨新闻","s":"哈尔","c":"#0284c7","p":"黑龙江","r":"东北"},{"n":"东方卫视","s":"上海","c":"#0369a1","p":"上海","r":"华东"},{"n":"上海新闻综合","s":"新闻","c":"#0369a1","p":"上海","r":"华东"},{"n":"上海娱乐","s":"娱乐","c":"#0369a1","p":"上海","r":"华东"},{"n":"上海戏剧","s":"戏剧","c":"#0369a1","p":"上海","r":"华东"},{"n":"上海纪实","s":"纪实","c":"#0369a1","p":"上海","r":"华东"},{"n":"上海东方影视","s":"东方","c":"#0369a1","p":"上海","r":"华东"},{"n":"江苏卫视","s":"江苏","c":"#15803d","p":"江苏","r":"华东"},{"n":"江苏城市","s":"城市","c":"#15803d","p":"江苏","r":"华东"},{"n":"江苏教育","s":"教育","c":"#15803d","p":"江苏","r":"华东"},{"n":"南京新闻","s":"南京","c":"#15803d","p":"江苏","r":"华东"},{"n":"浙江卫视","s":"浙江","c":"#1d4ed8","p":"浙江","r":"华东"},{"n":"浙江民生休闲","s":"民生","c":"#1d4ed8","p":"浙江","r":"华东"},{"n":"浙江少儿","s":"少儿","c":"#1d4ed8","p":"浙江","r":"华东"},{"n":"杭州综合","s":"杭州","c":"#1d4ed8","p":"浙江","r":"华东"},{"n":"安徽卫视","s":"安徽","c":"#1e40af","p":"安徽","r":"华东"},{"n":"安徽经济","s":"经济","c":"#1e40af","p":"安徽","r":"华东"},{"n":"安徽公共","s":"公共","c":"#1e40af","p":"安徽","r":"华东"},{"n":"福建卫视","s":"福建","c":"#0e7490","p":"福建","r":"华东"},{"n":"东南卫视","s":"福建","c":"#0e7490","p":"福建","r":"华东"},{"n":"福建新闻","s":"新闻","c":"#0e7490","p":"福建","r":"华东"},{"n":"厦门卫视","s":"福建","c":"#0e7490","p":"福建","r":"华东"},{"n":"江西卫视","s":"江西","c":"#0f766e","p":"江西","r":"华东"},{"n":"江西都市","s":"都市","c":"#0f766e","p":"江西","r":"华东"},{"n":"南昌新闻","s":"南昌","c":"#0f766e","p":"江西","r":"华东"},{"n":"山东卫视","s":"山东","c":"#b91c1c","p":"山东","r":"华东"},{"n":"山东齐鲁","s":"齐鲁","c":"#b91c1c","p":"山东","r":"华东"},{"n":"山东农科","s":"农科","c":"#b91c1c","p":"山东","r":"华东"},{"n":"济南新闻","s":"济南","c":"#b91c1c","p":"山东","r":"华东"},{"n":"河南卫视","s":"河南","c":"#c2410c","p":"河南","r":"华中"},{"n":"河南都市","s":"都市","c":"#c2410c","p":"河南","r":"华中"},{"n":"河南新闻","s":"新闻","c":"#c2410c","p":"河南","r":"华中"},{"n":"湖北卫视","s":"湖北","c":"#4338ca","p":"湖北","r":"华中"},{"n":"湖北综合","s":"综合","c":"#4338ca","p":"湖北","r":"华中"},{"n":"武汉新闻","s":"武汉","c":"#4338ca","p":"湖北","r":"华中"},{"n":"湖南卫视","s":"湖南","c":"#db2777","p":"湖南","r":"华中"},{"n":"湖南经视","s":"经视","c":"#db2777","p":"湖南","r":"华中"},{"n":"湖南娱乐","s":"娱乐","c":"#db2777","p":"湖南","r":"华中"},{"n":"湖南都市","s":"都市","c":"#db2777","p":"湖南","r":"华中"},{"n":"长沙新闻","s":"长沙","c":"#db2777","p":"湖南","r":"华中"},{"n":"广东卫视","s":"广东","c":"#1d4ed8","p":"广东","r":"华南"},{"n":"广东珠江","s":"珠江","c":"#1d4ed8","p":"广东","r":"华南"},{"n":"广东新闻","s":"新闻","c":"#1d4ed8","p":"广东","r":"华南"},{"n":"广州综合","s":"广州","c":"#1d4ed8","p":"广东","r":"华南"},{"n":"深圳卫视","s":"广东","c":"#1d4ed8","p":"广东","r":"华南"},{"n":"深圳都市","s":"深圳","c":"#1d4ed8","p":"广东","r":"华南"},{"n":"深圳财经","s":"深圳","c":"#1d4ed8","p":"广东","r":"华南"},{"n":"广西卫视","s":"广西","c":"#15803d","p":"广西","r":"华南"},{"n":"广西都市","s":"都市","c":"#15803d","p":"广西","r":"华南"},{"n":"南宁新闻","s":"南宁","c":"#15803d","p":"广西","r":"华南"},{"n":"海南卫视","s":"海南","c":"#0891b2","p":"海南","r":"华南"},{"n":"海南新闻","s":"新闻","c":"#0891b2","p":"海南","r":"华南"},{"n":"海口新闻","s":"海口","c":"#0891b2","p":"海南","r":"华南"},{"n":"重庆卫视","s":"重庆","c":"#be123c","p":"重庆","r":"西南"},{"n":"重庆新闻","s":"新闻","c":"#be123c","p":"重庆","r":"西南"},{"n":"重庆影视","s":"影视","c":"#be123c","p":"重庆","r":"西南"},{"n":"四川卫视","s":"四川","c":"#15803d","p":"四川","r":"西南"},{"n":"四川文化旅游","s":"文化","c":"#15803d","p":"四川","r":"西南"},{"n":"成都新闻","s":"成都","c":"#15803d","p":"四川","r":"西南"},{"n":"贵州卫视","s":"贵州","c":"#0e7490","p":"贵州","r":"西南"},{"n":"贵州新闻","s":"新闻","c":"#0e7490","p":"贵州","r":"西南"},{"n":"贵阳新闻","s":"贵阳","c":"#0e7490","p":"贵州","r":"西南"},{"n":"云南卫视","s":"云南","c":"#0f766e","p":"云南","r":"西南"},{"n":"云南都市","s":"都市","c":"#0f766e","p":"云南","r":"西南"},{"n":"昆明新闻","s":"昆明","c":"#0f766e","p":"云南","r":"西南"},{"n":"西藏卫视","s":"西藏","c":"#7c2d12","p":"西藏","r":"西南"},{"n":"西藏藏语","s":"藏语","c":"#7c2d12","p":"西藏","r":"西南"},{"n":"拉萨新闻","s":"拉萨","c":"#7c2d12","p":"西藏","r":"西南"},{"n":"陕西卫视","s":"陕西","c":"#b45309","p":"陕西","r":"西北"},{"n":"陕西新闻","s":"新闻","c":"#b45309","p":"陕西","r":"西北"},{"n":"西安新闻","s":"西安","c":"#b45309","p":"陕西","r":"西北"},{"n":"甘肃卫视","s":"甘肃","c":"#047857","p":"甘肃","r":"西北"},{"n":"甘肃都市","s":"都市","c":"#047857","p":"甘肃","r":"西北"},{"n":"兰州新闻","s":"兰州","c":"#047857","p":"甘肃","r":"西北"},{"n":"青海卫视","s":"青海","c":"#0d9488","p":"青海","r":"西北"},{"n":"青海新闻","s":"新闻","c":"#0d9488","p":"青海","r":"西北"},{"n":"西宁新闻","s":"西宁","c":"#0d9488","p":"青海","r":"西北"},{"n":"宁夏卫视","s":"宁夏","c":"#b91c1c","p":"宁夏","r":"西北"},{"n":"宁夏公共","s":"公共","c":"#b91c1c","p":"宁夏","r":"西北"},{"n":"银川新闻","s":"银川","c":"#b91c1c","p":"宁夏","r":"西北"},{"n":"新疆卫视","s":"新疆","c":"#15803d","p":"新疆","r":"西北"},{"n":"新疆维语","s":"维语","c":"#15803d","p":"新疆","r":"西北"},{"n":"乌鲁木齐新闻","s":"乌鲁","c":"#15803d","p":"新疆","r":"西北"},{"n":"翡翠台","s":"翡翠","c":"#111827","p":"香港","r":"港澳台"},{"n":"明珠台","s":"明珠","c":"#111827","p":"香港","r":"港澳台"},{"n":"无线新闻台","s":"无线","c":"#111827","p":"香港","r":"港澳台"},{"n":"凤凰卫视中文","s":"香港","c":"#111827","p":"香港","r":"港澳台"},{"n":"凤凰卫视资讯","s":"香港","c":"#111827","p":"香港","r":"港澳台"},{"n":"澳广视","s":"澳广","c":"#9a3412","p":"澳门","r":"港澳台"},{"n":"澳门综艺","s":"综艺","c":"#9a3412","p":"澳门","r":"港澳台"},{"n":"台视","s":"台视","c":"#1d4ed8","p":"台湾","r":"港澳台"},{"n":"中视","s":"中视","c":"#1d4ed8","p":"台湾","r":"港澳台"},{"n":"华视","s":"华视","c":"#1d4ed8","p":"台湾","r":"港澳台"},{"n":"民视","s":"民视","c":"#1d4ed8","p":"台湾","r":"港澳台"}],"byProv":true}];
+// ====== 状态 ======
+let catIdx=0, chIdx=0, zone="cat"; // zone: cat | ch
+
+const side=document.getElementById("side");
+const grid=document.getElementById("grid");
+const gridTitle=document.getElementById("gridTitle");
+const heroName=document.getElementById("heroName");
+
+// ====== 渲染：左侧分类 ======
+function renderCats(){
+  side.innerHTML="";
+  GROUPS.forEach((g,i)=>{
+    const d=document.createElement("div");
+    d.className="cat"+(i===catIdx?" active":"")+(zone==="cat"&&i===catIdx?" focus":"");
+    d.innerHTML=`<span class="ic">${g.ic}</span>${g.name}<span class="cnt">${g.ch.length}</span>`;
+    d.onclick=()=>{catIdx=i;selectCat();};
+    side.appendChild(d);
+  });
+  const act=side.children[catIdx]; if(act)act.scrollIntoView({block:"nearest"});
+}
+
+function curChannels(){ return GROUPS[catIdx].ch; }
+
+// ====== 渲染：频道网格（地方台按省份分区） ======
+function renderGrid(){
+  const g=GROUPS[catIdx], list=curChannels();
+  const provCount=g.byProv ? new Set(list.map(c=>c.p)).size : 0;
+  gridTitle.textContent=g.name+" · 共 "+list.length+" 个频道"
+    +(g.byProv ? " · 覆盖全部 "+provCount+" 个省级行政区" : "");
+  grid.innerHTML="";
+  if(!list.length){grid.innerHTML='<div style="color:var(--dim);padding:20px">暂无频道</div>';return;}
+  if(chIdx>=list.length)chIdx=list.length-1;
+  if(chIdx<0)chIdx=0;
+
+  let lastProv=null;
+  list.forEach((c,i)=>{
+    if(g.byProv && c.p!==lastProv){
+      const cnt=list.filter(x=>x.p===c.p).length;
+      const h=document.createElement("div");
+      h.className="prov-head";
+      h.innerHTML=`<span class="pn">${c.r} · ${c.p}</span><span class="pc">${cnt} 个频道</span>`;
+      grid.appendChild(h);
+      lastProv=c.p;
+    }
+    const d=document.createElement("div");
+    d.className="ch"+(zone==="ch"&&i===chIdx?" focus":"")+(c.n===heroName.textContent?" playing":"");
+    d.innerHTML=`<div class="logo" style="background:linear-gradient(135deg,${c.c},${shade(c.c)})">${c.s}</div><div class="nm">${c.n}</div>`;
+    d.onclick=()=>{chIdx=i;play(c);};
+    grid.appendChild(d);
+  });
+  const items=grid.querySelectorAll(".ch");
+  const cur=items[chIdx]; if(cur)cur.scrollIntoView({block:"nearest"});
+}
+
+function shade(hex){
+  const n=parseInt(hex.replace("#",""),16);
+  let r=(n>>16)&255,g=(n>>8)&255,b=n&255;
+  r=Math.max(0,r-50);g=Math.max(0,g-50);b=Math.max(0,b-50);
+  return `rgb(${r},${g},${b})`;
+}
+
+// ====== 选择频道（更新 Hero） ======
+function play(c){
+  heroName.textContent=c.n;
+  document.getElementById("heroBig").textContent=(c.s||"TV").slice(0,2);
+  document.getElementById("heroSub").textContent=(c.p?c.p+" · ":"")+GROUPS[catIdx].name+" · 高清直播";
+  document.getElementById("heroCat").textContent=c.p||GROUPS[catIdx].name;
+  document.getElementById("epgNow").textContent=sample(c.n);
+  document.getElementById("epgNext").textContent=sample2(c.n);
+  renderGrid();
+}
+function sample(n){const a=["新闻联播","黄金剧场","综艺大观","体育赛事","焦点访谈","经典纪录片","电视剧场"];return a[n.length%a.length];}
+function sample2(n){const a=["天气预报","晚间新闻","电视剧续集","访谈节目","动漫世界","美食栏目"];return a[(n.length+1)%a.length];}
+
+function selectCat(){zone="cat";chIdx=0;renderCats();renderGrid();}
+function selectCh(){zone="ch";renderCats();renderGrid();}
+
+// 左右键跨省跳转（仅在按省份分区的分类里生效）
+function jumpProv(dir){
+  const list=curChannels();
+  const marks=[];
+  list.forEach((c,i)=>{ if(i===0||c.p!==list[i-1].p) marks.push({p:c.p,idx:i}); });
+  const cur=list[chIdx].p;
+  const pos=marks.findIndex(m=>m.p===cur);
+  chIdx=marks[(pos+dir+marks.length)%marks.length].idx;
+  renderGrid();
+}
+
+// ====== 键盘 / 遥控交互 ======
+document.addEventListener("keydown",e=>{
+  const list=curChannels(), byProv=GROUPS[catIdx].byProv;
+  if(e.key==="ArrowUp"){
+    if(zone==="cat"){catIdx=(catIdx-1+GROUPS.length)%GROUPS.length;renderCats();renderGrid();}
+    else if(zone==="ch"){chIdx=Math.max(0,chIdx-1);renderGrid();}
+  }else if(e.key==="ArrowDown"){
+    if(zone==="cat"){catIdx=(catIdx+1)%GROUPS.length;renderCats();renderGrid();}
+    else if(zone==="ch"){chIdx=Math.min(list.length-1,chIdx+1);renderGrid();}
+  }else if(e.key==="ArrowLeft"){
+    if(zone==="cat"){catIdx=(catIdx-1+GROUPS.length)%GROUPS.length;renderCats();renderGrid();}
+    else if(zone==="ch"&&byProv){jumpProv(-1);}
+  }else if(e.key==="ArrowRight"){
+    if(zone==="cat"){selectCh();}
+    else if(zone==="ch"&&byProv){jumpProv(1);}
+    else if(zone==="ch"){chIdx=Math.min(list.length-1,chIdx+1);renderGrid();}
+  }else if(e.key==="Enter"){
+    if(zone==="cat")selectCh();
+    else play(list[chIdx]);
+  }else if(e.key==="Escape"){selectCat();}
+});
+
+// ====== 时钟 ======
+function tick(){
+  const d=new Date();
+  const p=x=>String(x).padStart(2,"0");
+  document.getElementById("clock").textContent=`${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  document.getElementById("date").textContent=`${d.getMonth()+1}月${d.getDate()}日 周${"日一二三四五六"[d.getDay()]}`;
+}
+setInterval(tick,1000);tick();
+
+// ====== 初始化 ======
+renderCats();
+play(GROUPS[0].ch[0]);
+
+</script>
+</body>
+</html>
