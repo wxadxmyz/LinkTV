@@ -2,62 +2,67 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>LinkTV</title>
   <link rel="icon" type="image/png" href="favicon.png" />
   <link rel="stylesheet" href="css/style.css" />
-  <!-- hls.js：用于在非原生支持 HLS 的浏览器里播放 .m3u8。安卓 WebView 原生支持，会自动跳过。 -->
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+  <!-- hls.js 本地内置：APK 完全离线也能播 m3u8；安卓 WebView 原生 HLS 会自动跳过 -->
+  <script src="js/hls.min.js"></script>
 </head>
 <body>
+  <!-- ===================== 全屏播放层 ===================== -->
   <div id="app">
-    <!-- 顶部：标题 + 分类标签 + 搜索 -->
-    <header id="topbar">
-      <div class="brand">📺 Link<span class="ver">TV</span></div>
-      <nav id="tabs" class="tabs"></nav>
-      <div class="top-actions">
-        <button id="btn-import" class="btn">导入M3U</button>
-        <button id="btn-fav" class="btn">收藏夹</button>
-        <input id="search" class="search" type="text" placeholder="搜索频道…" />
+    <div id="stage">
+      <video id="player" playsinline autoplay></video>
+
+      <!-- 频道准备画面：无可用直链时显示，界面不出现「源」字样 -->
+      <div id="idle" class="idle hidden">
+        <div class="idle-logo"><span class="idle-play">▶</span></div>
+        <div id="idle-name" class="idle-name">LinkTV</div>
+        <div class="idle-sub">正在准备频道</div>
+        <div class="idle-dots"><i></i><i></i><i></i></div>
       </div>
-    </header>
 
-    <!-- 主体：左频道列表 + 右播放器 -->
-    <main id="main">
-      <aside id="sidebar">
-        <ul id="channel-list" class="channel-list"></ul>
-      </aside>
-
-      <section id="stage">
-        <video id="player" playsinline></video>
-        <div id="overlay" class="overlay">
-          <div class="now-playing">
-            <div id="np-name" class="np-name">未选择频道</div>
-            <div id="np-status" class="np-status">请选择左侧频道开始播放</div>
+      <!-- OSD 信息层：3 秒自动隐藏，按任意键重新亮起 -->
+      <div id="osd" class="osd">
+        <div class="osd-top">
+          <div class="osd-tl">
+            <div class="osd-brand">Link<span>TV</span></div>
+            <div id="osd-ch" class="osd-ch">CCTV-1 综合</div>
+            <div id="osd-cat" class="osd-cat">央视 · 01 / 20</div>
+          </div>
+          <div class="osd-tr">
+            <div id="osd-res" class="osd-res">HD</div>
+            <div id="osd-clock" class="osd-clock">--:--</div>
           </div>
         </div>
-        <div id="controls" class="controls">
-          <button id="btn-playpause" class="ctrl">⏯ 播放/暂停</button>
-          <button id="btn-full" class="ctrl">⛶ 全屏</button>
-          <button id="btn-fav-toggle" class="ctrl">☆ 收藏</button>
-          <span id="ctrl-hint" class="hint">方向键选择 · 确定播放 · 菜单键导入</span>
-        </div>
-      </section>
-    </main>
-  </div>
 
-  <!-- 导入 M3U 弹窗 -->
-  <div id="modal" class="modal hidden">
-    <div class="modal-box">
-      <h3>导入播放列表 (M3U)</h3>
-      <p class="tip">粘贴一个 .m3u / .m3u8 文本或直链，将合并进频道列表。</p>
-      <textarea id="m3u-input" placeholder="例如：&#10;#EXTM3U&#10;#EXTINF:-1 tvg-name=&quot;测试&quot;,测试台&#10;https://example.com/test.m3u8"></textarea>
-      <div class="modal-actions">
-        <button id="m3u-apply" class="btn primary">导入</button>
-        <button id="m3u-remote" class="btn">拉取远程URL</button>
-        <button id="m3u-close" class="btn">关闭</button>
+        <div class="osd-bottom">
+          <div class="osd-progrow">
+            <span class="live"><i></i>LIVE</span>
+            <span id="osd-prog" class="osd-prog">正在直播 · CCTV-1 综合</span>
+            <span id="osd-ptime" class="osd-ptime">--:-- / --:--</span>
+          </div>
+          <div class="osd-bar"><div id="osd-barfill" class="osd-barfill"></div></div>
+          <div class="osd-hint">▲▼ 换台　◀▶ 换分类　确定 选台　菜单 收藏</div>
+        </div>
       </div>
-      <div id="m3u-msg" class="m3u-msg"></div>
+
+      <!-- 切台/收藏的短暂提示 -->
+      <div id="toast" class="toast hidden"></div>
+    </div>
+
+    <!-- ===================== 选台面板（确定键呼出） ===================== -->
+    <div id="panel" class="panel hidden">
+      <nav id="cats" class="cats"></nav>
+      <div class="plist-wrap">
+        <div class="plist-head">
+          <div id="plist-title" class="plist-title">央视</div>
+          <div id="plist-count" class="plist-count"></div>
+        </div>
+        <ul id="plist" class="plist"></ul>
+        <div class="panel-foot">▲▼ 选频道　◀▶ 换分类　确定 播放　菜单 收藏　返回 收起</div>
+      </div>
     </div>
   </div>
 

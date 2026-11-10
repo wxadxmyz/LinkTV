@@ -1,365 +1,423 @@
 /* =========================================================================
- * LinkTV —— 核心逻辑
- *  - 频道分组渲染 / 搜索 / 收藏
- *  - 播放器：hls.js（m3u8） + 原生 HLS 回退（安卓 WebView 原生支持）
- *  - 电视遥控器（D-pad）方向键导航 + 鼠标点击双支持
- *  - M3U 导入（文本 / 远程 URL）
+ * LinkTV v1.1.0 —— 全屏优先 TV 直播逻辑
+ *  · 启动即全屏播放；OSD 3 秒自动隐藏，任意键重新亮起
+ *  · 扁平播放队列：央视 → 卫视 → 地方台 → 收藏夹，上下键 ±1 换台、自动跨分类续播
+ *  · 确定键呼出「左侧分类 + 右侧频道列表」面板；左右键切分类；返回/Esc 收起
+ *  · 菜单键（或点星标）收藏当前频道；收藏夹为独立分类
+ *  · 直播源由程序内置 + 云端清单自动维护，界面不暴露任何「源」概念
+ *  · 节目单尽力取自官方 EPG，取不到降级为「频道名 + LIVE + 时段进度」
  * ========================================================================= */
 (function () {
   "use strict";
 
-  var groups = (window.CHANNEL_GROUPS || []).map(function (g) {
+  var $ = function (id) { return document.getElementById(id); };
+  var RAW = (window.CHANNEL_GROUPS || []).map(function (g) {
     return { name: g.name, channels: g.channels.slice() };
   });
-  var remoteM3u = window.REMOTE_M3U_URL || "";
-
-  // 展平所有频道，便于收藏/搜索
-  function allChannels() {
-    var out = [];
-    groups.forEach(function (g) {
-      g.channels.forEach(function (c) { out.push(c); });
-    });
-    return out;
-  }
-
-  // ---------- 状态 ----------
-  var state = {
-    activeGroup: 0,
-    listIndex: 0,
-    zone: "list",        // tabs | list | controls
-    tabsIndex: 0,
-    ctrlIndex: 0,
-    favMode: false,      // 是否处于收藏夹视图
-    searchMode: false,
-    current: null,       // 当前播放频道
-    hls: null
-  };
-  var FAV_KEY = "tv_live_fav_v1";
-
-  // ---------- DOM ----------
-  var $ = function (id) { return document.getElementById(id); };
-  var tabsEl = $("tabs");
-  var listEl = $("channel-list");
-  var video = $("player");
-  var overlay = $("overlay");
-  var npName = $("np-name");
-  var npStatus = $("np-status");
-  var searchInput = $("search");
-  var controls = $("controls");
-  var ctrlBtns = [
-    $("btn-playpause"), $("btn-full"), $("btn-fav-toggle")
+  var BUILTIN = window.BUILTIN_SOURCES || {};
+  var REMOTE_SRC = window.OFFICIAL_SOURCES_URL || "";
+  var CATS = [
+    { name: "央视", ic: "📺" }, { name: "卫视", ic: "🛰" },
+    { name: "地方台", ic: "🏙" }, { name: "收藏夹", ic: "★" }
   ];
+  var FAV_KEY = "linktv_fav_v11", LAST_KEY = "linktv_last_v11";
 
-  // ---------- 收藏 ----------
-  function getFav() {
-    try { return JSON.parse(localStorage.getItem(FAV_KEY) || "[]"); }
-    catch (e) { return []; }
-  }
-  function setFav(arr) { localStorage.setItem(FAV_KEY, JSON.stringify(arr)); }
-  function isFav(ch) {
-    return getFav().some(function (f) { return f.name === ch.name && f.url === ch.url; });
-  }
-  function toggleFav(ch) {
-    var f = getFav();
-    var i = f.findIndex(function (x) { return x.name === ch.name && x.url === ch.url; });
-    if (i >= 0) f.splice(i, 1); else f.push({ name: ch.name, url: ch.url });
-    setFav(f);
-    renderList();
-    updateFavToggle();
-  }
+  // 频道名 → 频道对象（收藏夹还原用，引用同一对象，源更新会自动生效）
+  var byName = {};
+  RAW.forEach(function (g) { g.channels.forEach(function (c) { if (!byName[c.name]) byName[c.name] = c; }); });
 
-  // ---------- 渲染：分类标签 ----------
-  function renderTabs() {
-    tabsEl.innerHTML = "";
-    groups.forEach(function (g, i) {
-      var t = document.createElement("div");
-      t.className = "tab" + (i === state.activeGroup && !state.favMode ? " active" : "");
-      t.textContent = g.name;
-      t.tabIndex = 0;
-      t.addEventListener("click", function () { selectGroup(i); });
-      tabsEl.appendChild(t);
+  var video = $("player"), idle = $("idle"), osd = $("osd"), panel = $("panel");
+  var toast = $("toast");
+
+  var state = {
+    gi: 0,           // 当前分类
+    pos: 0,          // 在扁平队列 flat 中的位置（当前播放 / 面板高亮）
+    current: null,   // 当前播放频道
+    panel: false,
+    hls: null,
+    retry: false,
+    prog: null,      // 当前节目 {title, st, et}
+    osdTimer: null, toastTimer: null
+  };
+  var groups = [], flat = [];
+  var fav = loadFav();
+
+  // ---------------- 收藏 ----------------
+  function loadFav() { try { return JSON.parse(localStorage.getItem(FAV_KEY) || "[]"); } catch (e) { return []; } }
+  function saveFav() { try { localStorage.setItem(FAV_KEY, JSON.stringify(fav)); } catch (e) {} }
+  function isFav(name) { return fav.some(function (f) { return f.name === name; }); }
+
+  // ---------------- 数据结构 ----------------
+  function buildGroups() {
+    groups = RAW.map(function (g, i) {
+      return { name: g.name, ic: CATS[i].ic, channels: g.channels.slice(), byProv: g.name === "地方台" };
+    });
+    var favCh = fav.map(function (f) { return byName[f.name]; }).filter(Boolean);
+    groups.push({ name: "收藏夹", ic: "★", channels: favCh, byProv: false });
+    flat = [];
+    groups.forEach(function (g, gi) {
+      g.channels.forEach(function (ch, li) { flat.push({ ch: ch, gi: gi, li: li, catName: g.name }); });
     });
   }
 
-  // ---------- 当前可见频道列表 ----------
-  function currentViewChannels() {
-    if (state.favMode) return getFav();
-    var kw = searchInput.value.trim().toLowerCase();
-    var list = groups[state.activeGroup].channels;
-    if (kw) {
-      list = list.filter(function (c) {
-        return (c.name || "").toLowerCase().indexOf(kw) >= 0;
-      });
-    }
-    return list;
-  }
-
-  // ---------- 渲染：频道列表 ----------
-  function renderList() {
-    listEl.innerHTML = "";
-    var list = currentViewChannels();
-    if (!list.length) {
-      var empty = document.createElement("li");
-      empty.className = "channel";
-      empty.style.justifyContent = "center";
-      empty.style.color = "var(--text-dim)";
-      empty.textContent = state.favMode ? "暂无收藏" : "无匹配频道";
-      listEl.appendChild(empty);
-      return;
-    }
-    if (state.listIndex >= list.length) state.listIndex = list.length - 1;
-    if (state.listIndex < 0) state.listIndex = 0;
-
-    list.forEach(function (c, i) {
-      var li = document.createElement("li");
-      li.className = "channel";
-      li.tabIndex = 0;
-      if (state.favMode && state.zone === "list" && i === state.listIndex) li.classList.add("focus");
-      if (state.current && c.name === state.current.name && c.url === state.current.url) {
-        li.classList.add("active", "playing");
-      }
-      var idx = document.createElement("span");
-      idx.className = "idx"; idx.textContent = (i + 1);
-      var name = document.createElement("span");
-      name.className = "cname"; name.textContent = c.name || "(未命名)";
-      li.appendChild(idx); li.appendChild(name);
-      if (isFav(c)) {
-        var star = document.createElement("span");
-        star.className = "star"; star.textContent = "★";
-        li.appendChild(star);
-      }
-      li.addEventListener("click", function () { state.listIndex = i; playChannel(c); });
-      li.addEventListener("focus", function () { state.listIndex = i; });
-      listEl.appendChild(li);
+  // 合并云端/内置源清单（按频道名覆盖 url）
+  function applySources(map) {
+    if (!map) return;
+    var cur = state.current, had = cur && !!cur.url;
+    RAW.forEach(function (g) {
+      g.channels.forEach(function (c) { if (map[c.name]) c.url = map[c.name]; });
     });
-    highlightListFocus();
+    if (cur && !had && cur.url) { playChannel(cur); updateRes(0); } // 原本无直链、清单补齐后自动续播
   }
 
-  function highlightListFocus() {
-    var items = listEl.querySelectorAll(".channel");
-    items.forEach(function (el, i) {
-      el.classList.toggle("focus", state.zone === "list" && i === state.listIndex && !el.textContent.match(/暂无|无匹配/));
-    });
-    var cur = items[state.listIndex];
-    if (cur) cur.scrollIntoView({ block: "nearest" });
-  }
+  function wrap(n, len) { if (!len) return 0; return ((n % len) + len) % len; }
+  function pad(x) { return x < 10 ? "0" + x : "" + x; }
+  function hhmm(d) { return pad(d.getHours()) + ":" + pad(d.getMinutes()); }
 
-  // ---------- 播放 ----------
+  // ---------------- 播放 ----------------
+  function destroyHls() { if (state.hls) { try { state.hls.destroy(); } catch (e) {} state.hls = null; } }
+  function stopVideo() { try { video.pause(); video.removeAttribute("src"); video.load(); } catch (e) {} }
+  function nativeHls() { try { return !!video.canPlayType("application/vnd.apple.mpegurl"); } catch (e) { return false; } }
+
+  function showIdle(ch) {
+    $("idle-name").textContent = ch ? ch.name : "LinkTV";
+    idle.classList.remove("hidden");
+    updateRes(0);
+  }
+  function hideIdle() { idle.classList.add("hidden"); }
+
   function playChannel(ch) {
-    if (!ch || !ch.url) {
-      setStatus(ch ? ch.name : "", "该频道暂未配置可用源（请在 channels.js 或导入中补充）");
-      return;
-    }
-    state.current = ch;
-    renderList();
-    setStatus(ch.name, "正在连接直播源…");
-    overlay.classList.remove("hidden");
+    destroyHls(); stopVideo(); state.retry = false;
+    if (!ch || !ch.url) { showIdle(ch); return; }
+    hideIdle();
+    _play(ch, nativeHls());
+  }
 
-    if (state.hls) { state.hls.destroy(); state.hls = null; }
-    video.pause();
-
+  function _play(ch, native) {
     var url = ch.url;
-    var canNative = video.canPlayType("application/vnd.apple.mpegurl");
-    if (window.Hls && window.Hls.isSupported() && !canNative) {
-      var hls = new window.Hls({ lowLatencyMode: false, liveDurationInfinity: true });
-      state.hls = hls;
-      hls.loadSource(url);
-      hls.attachMedia(video);
-      hls.on(window.Hls.Events.MANIFEST_PARSED, function () {
-        video.play().catch(function () {});
-      });
-      hls.on(window.Hls.Events.ERROR, function (evt, data) {
-        if (data && data.fatal) {
-          setStatus(ch.name, "直播源加载失败（源可能失效或网络不可达）");
-        }
-      });
-    } else if (canNative) {
-      // 安卓 WebView 原生支持 HLS
+    if (native) {
       video.src = url;
       video.play().catch(function () {});
-      video.addEventListener("error", function () {
-        setStatus(ch.name, "直播源加载失败（源可能失效或网络不可达）");
-      }, { once: true });
+      video.addEventListener("loadedmetadata", function () { readResFromVideo(); }, { once: true });
+      video.addEventListener("error", function () { if (state.current === ch) fallback(ch, true); }, { once: true });
+    } else if (window.Hls && window.Hls.isSupported()) {
+      var hls = new window.Hls({ lowLatencyMode: true, liveDurationInfinity: true, enableWorker: true, maxBufferLength: 30 });
+      state.hls = hls;
+      hls.loadSource(url); hls.attachMedia(video);
+      hls.on(window.Hls.Events.MANIFEST_PARSED, function (e, d) {
+        video.play().catch(function () {});
+        readResFromLevels(d && d.levels);
+      });
+      hls.on(window.Hls.Events.ERROR, function (evt, d) {
+        if (d && d.fatal && state.current === ch) fallback(ch, false);
+      });
+    } else if (nativeHls()) {
+      _play(ch, true);
     } else {
-      setStatus(ch.name, "当前环境不支持 HLS 播放");
-      return;
-    }
-    video.addEventListener("playing", function () {
-      overlay.classList.add("hidden");
-      setStatus(ch.name, "直播中");
-    }, { once: true });
-    updateFavToggle();
-  }
-
-  function setStatus(name, status) {
-    if (name) npName.textContent = name;
-    npStatus.textContent = status;
-  }
-
-  function updateFavToggle() {
-    if (!state.current) { $("btn-fav-toggle").textContent = "☆ 收藏"; return; }
-    $("btn-fav-toggle").textContent = isFav(state.current) ? "★ 已收藏" : "☆ 收藏";
-  }
-
-  // ---------- 分类切换 ----------
-  function selectGroup(i) {
-    state.activeGroup = i;
-    state.favMode = false;
-    state.searchMode = false;
-    state.listIndex = 0;
-    state.zone = "list";
-    renderTabs();
-    renderList();
-    focusZone("list");
-  }
-
-  // ---------- 焦点管理（电视遥控） ----------
-  function focusZone(zone) {
-    state.zone = zone;
-    renderTabs(); highlightListFocus();
-    if (zone === "tabs") {
-      var t = tabsEl.children[state.tabsIndex]; if (t) t.classList.add("focus");
-    } else if (zone === "controls") {
-      ctrlBtns.forEach(function (b, i) { b.classList.toggle("focus", i === state.ctrlIndex); });
+      showIdle(ch);
     }
   }
 
-  function moveZone(dir) {
-    // dir: -1 上, +1 下
-    if (state.zone === "tabs" && dir > 0) { state.zone = "list"; highlightListFocus(); }
-    else if (state.zone === "list" && dir < 0) { state.zone = "tabs"; focusZone("tabs"); }
-    else if (state.zone === "list" && dir > 0) { state.zone = "controls"; focusZone("controls"); }
-    else if (state.zone === "controls" && dir < 0) { state.zone = "list"; highlightListFocus(); }
+  function fallback(ch, fromNative) {
+    if (state.retry) { showIdle(ch); return; }
+    state.retry = true;
+    destroyHls(); stopVideo();
+    if (fromNative && window.Hls && window.Hls.isSupported()) _play(ch, false);
+    else if (!fromNative && nativeHls()) _play(ch, true);
+    else showIdle(ch);
   }
 
-  function moveHorizontal(dir) {
-    if (state.zone === "tabs") {
-      state.tabsIndex = (state.tabsIndex + dir + groups.length) % groups.length;
-      selectGroup(state.tabsIndex);
-    } else if (state.zone === "list") {
-      // 左右切换分类，体验更贴近电视
-      var g = (state.activeGroup + dir + groups.length) % groups.length;
-      selectGroup(g); state.tabsIndex = g;
-    } else if (state.zone === "controls") {
-      state.ctrlIndex = (state.ctrlIndex + dir + ctrlBtns.length) % ctrlBtns.length;
-      focusZone("controls");
+  function readResFromVideo() { if (video.videoHeight) updateRes(video.videoHeight); }
+  function readResFromLevels(levels) {
+    if (!levels || !levels.length) return;
+    var h = 0; levels.forEach(function (l) { if (l && l.height && l.height > h) h = l.height; });
+    if (h) updateRes(h);
+  }
+  function updateRes(h) {
+    var t = "HD";
+    if (h >= 2000) t = "4K"; else if (h >= 1000) t = "1080P";
+    else if (h >= 700) t = "720P"; else if (h >= 560) t = "576P";
+    else if (h > 0) t = "480P";
+    $("osd-res").textContent = t;
+  }
+
+  // ---------------- OSD ----------------
+  function updateOSD(ch, item) {
+    $("osd-ch").textContent = ch ? ch.name : "LinkTV";
+    if (item) $("osd-cat").textContent = item.catName + " · " + pad(item.li + 1) + " / " + pad(groups[item.gi].channels.length);
+    state.prog = null;
+    paintProgram(ch);
+    fetchEpg(ch);
+  }
+
+  // 直播无时长：进度条表示「当前节目/时段」的播出进度，带 LIVE 红点，不可拖动
+  function segInfo() {
+    var now = new Date(), st = new Date(now);
+    st.setMinutes(now.getMinutes() < 30 ? 0 : 30, 0, 0);
+    var et = new Date(st.getTime() + 30 * 60000);
+    return { p: (now - st) / (et - st), st: hhmm(st), et: hhmm(et) };
+  }
+  function paintProgram(ch) {
+    ch = ch || state.current;
+    if (!ch) return;
+    var p, s;
+    if (state.prog) {
+      var now = Date.now();
+      p = Math.max(0, Math.min(1, (now - state.prog.st) / (state.prog.et - state.prog.st)));
+      $("osd-prog").textContent = state.prog.title;
+      $("osd-ptime").textContent = hhmm(new Date(state.prog.st)) + " - " + hhmm(new Date(state.prog.et));
+    } else {
+      s = segInfo(); p = s.p;
+      $("osd-prog").textContent = "正在直播 · " + ch.name;
+      $("osd-ptime").textContent = s.st + " - " + s.et;
+    }
+    $("osd-barfill").style.width = (p * 100).toFixed(1) + "%";
+  }
+
+  // 尽力取央视官方节目单；CORS/失败一律静默降级，不影响播放与界面
+  function cctvCode(name) {
+    var m = name.match(/^CCTV-(\d+)/); if (!m) return null;
+    if (name.indexOf("5+") >= 0) return "cctv5plus";
+    if (name.indexOf("欧洲") >= 0 || name.indexOf("美洲") >= 0) return "cctv4";
+    return "cctv" + m[1];
+  }
+  function fetchEpg(ch) {
+    if (!ch || !window.fetch) return;
+    var code = cctvCode(ch.name); if (!code) return;
+    var d = new Date();
+    var ds = "" + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate());
+    var url = "https://api.cntv.cn/epg/getEpgInfoByChannelCode?c=" + code + "&d=" + ds;
+    var ctrl = window.AbortController ? new AbortController() : null;
+    var to = setTimeout(function () { if (ctrl) ctrl.abort(); }, 2500);
+    fetch(url, ctrl ? { signal: ctrl.signal } : {})
+      .then(function (r) { return r.json(); })
+      .then(function (j) { clearTimeout(to); var p = parseEpg(j); if (p && state.current === ch) { state.prog = p; paintProgram(ch); } })
+      .catch(function () { clearTimeout(to); });
+  }
+  function parseEpg(j) {
+    try {
+      var arr = j && (j.data || (j.result && j.result.data) || j.program || j.list);
+      if (!Array.isArray(arr)) return null;
+      var now = Date.now(), best = null;
+      arr.forEach(function (it) {
+        var t = it.title || it.name || it.programName;
+        var s = it.startTime || it.start || it.st, e = it.endTime || it.end || it.et;
+        if (!t || !s || !e) return;
+        var st = new Date(String(s).replace(/-/g, "/")).getTime();
+        var et = new Date(String(e).replace(/-/g, "/")).getTime();
+        if (!isNaN(st) && !isNaN(et) && now >= st && now <= et) best = { title: t, st: st, et: et };
+      });
+      return best;
+    } catch (e) { return null; }
+  }
+
+  function showOSD() {
+    if (state.panel) return;
+    osd.classList.remove("hidden");
+    clearTimeout(state.osdTimer);
+    state.osdTimer = setTimeout(function () { osd.classList.add("hidden"); }, 3000);
+  }
+  function showToast(txt) {
+    toast.textContent = txt; toast.classList.remove("hidden");
+    clearTimeout(state.toastTimer);
+    state.toastTimer = setTimeout(function () { toast.classList.add("hidden"); }, 1300);
+  }
+
+  // ---------------- 播放调度 ----------------
+  function playAt(pos) {
+    if (!flat.length) return;
+    state.pos = wrap(pos, flat.length);
+    var item = flat[state.pos];
+    state.gi = item.gi;
+    state.current = item.ch;
+    playChannel(item.ch);
+    updateOSD(item.ch, item);
+    updateRes(0);
+    try { localStorage.setItem(LAST_KEY, item.ch.name); } catch (e) {}
+  }
+  function step(dir) { playAt(state.pos + dir); }
+
+  function setCat(gi) {
+    state.gi = wrap(gi, CATS.length);
+    var p = -1;
+    for (var i = 0; i < flat.length; i++) { if (flat[i].gi === state.gi) { p = i; break; } }
+    if (p >= 0) state.pos = p;
+    if (state.panel) renderPanel();
+  }
+  function switchCatAndPlay(dir) {
+    // 全屏左右键：切到下一个「非空」分类并播放其首个频道（跳过空收藏夹）
+    if (!flat.length) return;
+    var gi = state.gi;
+    for (var n = 0; n < CATS.length; n++) {
+      gi = wrap(gi + dir, CATS.length);
+      if (groups[gi] && groups[gi].channels.length) break;
+    }
+    if (!groups[gi] || !groups[gi].channels.length) return;
+    for (var i = 0; i < flat.length; i++) {
+      if (flat[i].gi === gi) { playAt(i); return; }
     }
   }
 
-  function moveVertical(dir) {
-    if (state.zone === "list") {
-      var n = currentViewChannels().length;
-      state.listIndex = Math.max(0, Math.min(n - 1, state.listIndex + dir));
-      highlightListFocus();
-    } else if (state.zone === "controls") {
-      // 控制栏只有一行，上下回到列表
-      moveZone(-1);
-    }
+  // ---------------- 面板 ----------------
+  function openPanel() {
+    state.panel = true;
+    panel.classList.remove("hidden");
+    osd.classList.add("hidden"); clearTimeout(state.osdTimer);
+    // 定位到当前播放频道所在分类
+    if (flat[state.pos]) state.gi = flat[state.pos].gi;
+    renderPanel();
+  }
+  function closePanel() {
+    state.panel = false;
+    panel.classList.add("hidden");
+    showOSD();
+  }
+  function confirmPanel() { playAt(state.pos); closePanel(); }
+  function moveList(dir) {
+    if (!flat.length) return;
+    // 整个扁平队列循环：上下键连续换台，到分组边界自动跨到相邻分类
+    state.pos = wrap(state.pos + dir, flat.length);
+    state.gi = flat[state.pos].gi;
+    renderPanel();
   }
 
-  function activate() {
-    if (state.zone === "tabs") { selectGroup(state.tabsIndex); }
-    else if (state.zone === "list") {
-      var c = currentViewChannels()[state.listIndex];
-      if (c) playChannel(c);
-    } else if (state.zone === "controls") {
-      ctrlBtns[state.ctrlIndex].click();
-    }
-  }
-
-  // ---------- 键盘（含电视 D-pad：方向键=方向，确定=Enter） ----------
-  document.addEventListener("keydown", function (e) {
-    if (!$("modal").classList.contains("hidden")) return; // 弹窗时不拦截
-    switch (e.key) {
-      case "ArrowUp": e.preventDefault(); moveZone(-1); break;
-      case "ArrowDown": e.preventDefault(); moveZone(1); break;
-      case "ArrowLeft": e.preventDefault(); moveHorizontal(-1); break;
-      case "ArrowRight": e.preventDefault(); moveHorizontal(1); break;
-      case "Enter": e.preventDefault(); activate(); break;
-      case " ": e.preventDefault(); togglePlay(); break;
-      case "f": case "F": toggleFull(); break;
-      case "Menu": e.preventDefault(); openImport(); break;
-      default: break;
-    }
-  });
-
-  function togglePlay() {
-    if (video.paused) video.play().catch(function () {}); else video.pause();
-  }
-  function toggleFull() {
-    if (!document.fullscreenElement) {
-      $("stage").requestFullscreen && $("stage").requestFullscreen();
-    } else { document.exitFullscreen && document.exitFullscreen(); }
-  }
-
-  // ---------- 控制栏按钮 ----------
-  $("btn-playpause").addEventListener("click", togglePlay);
-  $("btn-full").addEventListener("click", toggleFull);
-  $("btn-fav-toggle").addEventListener("click", function () {
-    if (state.current) toggleFav(state.current);
-  });
-  $("btn-fav").addEventListener("click", function () {
-    state.favMode = !state.favMode;
-    state.listIndex = 0; state.zone = "list";
-    renderTabs(); renderList(); focusZone("list");
-  });
-  searchInput.addEventListener("input", function () {
-    state.searchMode = true; state.favMode = false; state.listIndex = 0;
-    renderList();
-  });
-
-  // ---------- 导入 M3U ----------
-  function parseM3U(text) {
-    var lines = text.split(/\r?\n/);
-    var out = [], name = "", pending = null;
-    lines.forEach(function (raw) {
-      var line = raw.trim();
-      if (!line) return;
-      if (line.indexOf("#EXTINF") === 0) {
-        var m = line.match(/,([^,]*)$/);
-        name = m ? m[1].trim() : "频道";
-        pending = { name: name, url: "" };
-      } else if (line.charAt(0) !== "#") {
-        if (pending) { pending.url = line; out.push(pending); pending = null; }
-        else out.push({ name: line, url: line });
-      }
+  function renderPanel() {
+    // 左侧分类列
+    var cats = $("cats"); cats.innerHTML = "";
+    var title = document.createElement("div"); title.className = "cats-title"; title.textContent = "频道分类";
+    cats.appendChild(title);
+    CATS.forEach(function (c, i) {
+      var el = document.createElement("div");
+      el.className = "cat" + (i === state.gi ? " active" : "");
+      var cnt = groups[i].channels.length;
+      el.innerHTML = '<span class="ic">' + c.ic + '</span><span>' + c.name + '</span><span class="cnt">' + cnt + '</span>';
+      el.addEventListener("click", function () { setCat(i); });
+      cats.appendChild(el);
     });
-    return out;
+
+    // 右侧频道列表
+    var g = groups[state.gi];
+    $("plist-title").textContent = g.name;
+    var provs = g.byProv ? (function () { var s = {}; g.channels.forEach(function (c) { if (c.prov) s[c.prov] = 1; }); return Object.keys(s).length; })() : 0;
+    $("plist-count").textContent = "共 " + g.channels.length + " 个频道" + (provs ? " · 覆盖 " + provs + " 个省级行政区" : "");
+
+    var ul = $("plist"); ul.innerHTML = "";
+    if (!g.channels.length) {
+      var em = document.createElement("div"); em.className = "plist-empty";
+      em.textContent = "暂无收藏频道 · 选中频道按菜单键或点星标即可收藏";
+      ul.appendChild(em); return;
+    }
+
+    var lastProv = null, focusEl = null;
+    g.channels.forEach(function (ch, li) {
+      if (g.byProv && ch.prov && ch.prov !== lastProv) {
+        lastProv = ch.prov;
+        var cnt = g.channels.filter(function (x) { return x.prov === ch.prov; }).length;
+        var head = document.createElement("div"); head.className = "prov-head";
+        head.innerHTML = '<span>' + (ch.region ? ch.region + " · " : "") + ch.prov + '</span><span class="pc">' + cnt + ' 个频道</span>';
+        ul.appendChild(head);
+      }
+      // 找到该频道在 flat 中的位置
+      var fi = -1;
+      for (var i = 0; i < flat.length; i++) { if (flat[i].gi === state.gi && flat[i].ch === ch) { fi = i; break; } }
+      var liEl = document.createElement("li");
+      liEl.className = "ch" + (fi === state.pos ? " focus" : "") + (state.current === ch ? " playing" : "");
+      liEl.innerHTML = '<span class="num">' + pad(li + 1) + '</span><span class="nm">' + ch.name + '</span>'
+        + '<span class="star' + (isFav(ch.name) ? " on" : "") + '">' + (isFav(ch.name) ? "★" : "☆") + '</span>';
+      liEl.querySelector(".star").addEventListener("click", function (e) { e.stopPropagation(); toggleFav(ch); });
+      liEl.addEventListener("click", function () { if (fi >= 0) { state.pos = fi; } confirmPanel(); });
+      ul.appendChild(liEl);
+      if (fi === state.pos) focusEl = liEl;
+    });
+    if (focusEl && focusEl.scrollIntoView) focusEl.scrollIntoView({ block: "nearest" });
   }
 
-  function openImport() { $("modal").classList.remove("hidden"); $("m3u-msg").textContent = ""; }
-  function closeImport() { $("modal").classList.add("hidden"); }
-  function applyM3U(text) {
-    var parsed = parseM3U(text);
-    if (!parsed.length) { $("m3u-msg").style.color = "var(--accent)"; $("m3u-msg").textContent = "未解析到频道，请检查格式"; return; }
-    groups.push({ name: "导入-" + (groups.length), channels: parsed });
-    renderTabs(); renderList();
-    $("m3u-msg").style.color = "var(--ok)";
-    $("m3u-msg").textContent = "成功导入 " + parsed.length + " 个频道";
-    setTimeout(closeImport, 900);
+  // ---------------- 收藏切换 ----------------
+  function toggleFav(ch) {
+    if (!ch) return;
+    var i = -1; fav.forEach(function (f, k) { if (f.name === ch.name) i = k; });
+    var added = i < 0;
+    if (added) fav.push({ name: ch.name, url: ch.url || "", prov: ch.prov || "" });
+    else fav.splice(i, 1);
+    saveFav();
+
+    // 以「当前高亮项」为锚点重建后重新定位，避免焦点跳回正在播放的频道
+    var anchor = flat[state.pos];
+    var anchorName = anchor && anchor.ch.name, anchorGi = anchor && anchor.gi;
+    buildGroups();
+    var p = -1;
+    if (anchorName) {
+      for (var k = 0; k < flat.length; k++) {
+        if (flat[k].ch.name === anchorName && flat[k].gi === anchorGi) { p = k; break; }
+      }
+      if (p < 0) for (var k2 = 0; k2 < flat.length; k2++) {
+        if (flat[k2].ch.name === anchorName) { p = k2; break; }
+      }
+    }
+    if (p < 0) p = Math.min(state.pos, flat.length - 1);
+    state.pos = p < 0 ? 0 : p;
+    if (flat[state.pos]) state.gi = flat[state.pos].gi;
+    if (state.panel) renderPanel();
+    showToast(added ? "★ 已收藏 · " + ch.name : "☆ 已取消收藏 · " + ch.name);
+    if (!state.panel) showOSD();
+  }
+  function currentTarget() {
+    if (state.panel && flat[state.pos]) return flat[state.pos].ch;
+    return state.current;
   }
 
-  $("btn-import").addEventListener("click", openImport);
-  $("m3u-close").addEventListener("click", closeImport);
-  $("m3u-apply").addEventListener("click", function () { applyM3U($("m3u-input").value); });
-  $("m3u-remote").addEventListener("click", function () {
-    var url = prompt("输入 M3U 直链 URL：", remoteM3u || "https://example.com/cn.m3u");
-    if (!url) return;
-    $("m3u-msg").textContent = "正在拉取…";
-    fetch(url).then(function (r) { return r.text(); }).then(function (t) { applyM3U(t); })
-      .catch(function () { $("m3u-msg").style.color = "var(--accent)"; $("m3u-msg").textContent = "拉取失败（可能跨域或被墙）"; });
-  });
-
-  // 显示控制栏（鼠标移动时）
-  $("stage").addEventListener("mousemove", function () { controls.classList.add("show"); });
-
-  // ---------- 初始化 ----------
-  renderTabs();
-  renderList();
-  focusZone("list");
-  updateFavToggle();
-  // 默认自动播放第一个频道（CCTV-1）
-  if (groups.length && groups[0].channels.length) {
-    playChannel(groups[0].channels[0]);
+  // ---------------- 键盘 / 遥控 ----------------
+  function onKey(e) {
+    var k = e.key || "", kc = e.keyCode || 0;
+    var up = k === "ArrowUp" || kc === 38, down = k === "ArrowDown" || kc === 40;
+    var left = k === "ArrowLeft" || kc === 37, right = k === "ArrowRight" || kc === 39;
+    var enter = k === "Enter" || k === "NumpadEnter" || kc === 13 || kc === 23;
+    var back = k === "Escape" || k === "Backspace" || k === "BrowserBack" || kc === 27 || kc === 461;
+    var menu = k === "Menu" || k === "ContextMenu" || kc === 93;
+    if (!(up || down || left || right || enter || back || menu)) return;
+    e.preventDefault();
+    if (menu) toggleFav(currentTarget());
+    else if (back) { if (state.panel) closePanel(); }
+    else if (enter) { state.panel ? confirmPanel() : openPanel(); }
+    else if (up) { state.panel ? moveList(-1) : step(-1); }
+    else if (down) { state.panel ? moveList(1) : step(1); }
+    else if (left) { state.panel ? setCat(state.gi - 1) : switchCatAndPlay(-1); }
+    else if (right) { state.panel ? setCat(state.gi + 1) : switchCatAndPlay(1); }
+    if (!state.panel) showOSD();
   }
+
+  // 供安卓外壳转发 Back / Menu 键（WebView 默认不派发这两个键）
+  window.__linktvBack = function () { if (state.panel) { closePanel(); return true; } return false; };
+  window.__linktvMenu = function () { toggleFav(currentTarget()); };
+
+  // ---------------- 触屏 / 鼠标 ----------------
+  $("stage").addEventListener("click", function () { if (!state.panel) openPanel(); else closePanel(); });
+  panel.addEventListener("click", function (e) { if (e.target === panel) closePanel(); });
+  document.addEventListener("mousemove", function () { if (!state.panel) showOSD(); });
+
+  // ---------------- 云端清单（script 加载，避开 file:// 的 CORS） ----------------
+  window.__LINKTV_SOURCES_READY__ = function (map) { applySources(map); };
+  function loadScript(src) {
+    var s = document.createElement("script"); s.src = src;
+    s.onerror = function () {}; document.head.appendChild(s);
+  }
+
+  // ---------------- 启动 ----------------
+  applySources(BUILTIN);
+  buildGroups();
+  var last = null; try { last = localStorage.getItem(LAST_KEY); } catch (e) {}
+  var start = 0;
+  if (last) for (var i = 0; i < flat.length; i++) { if (flat[i].ch.name === last) { start = i; break; } }
+  playAt(start);
+  showOSD();
+
+  document.addEventListener("keydown", onKey);
+  setInterval(function () {
+    var d = new Date(); $("osd-clock").textContent = pad(d.getHours()) + ":" + pad(d.getMinutes());
+    paintProgram(state.current);
+  }, 1000);
+
+  // 先内置清单、再云端清单（真机联网时自动更新，失败静默用内置）
+  loadScript("data/sources.js");
+  if (REMOTE_SRC) setTimeout(function () { loadScript(REMOTE_SRC); }, 400);
 })();

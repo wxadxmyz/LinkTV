@@ -1,1085 +1,275 @@
 /**
- * 频道数据源 channels.js
- * ------------------------------------------------------------------
- * 说明：
- *  - 央视使用央视官方 HLS（.m3u8），相对最稳。
- *  - 卫视 / 各省地方台为公开示例，url 留空（""）表示该台"源待补"，
- *    运行时播放会提示"暂未配置可用源"。请在下方或 App 内「导入M3U」补源。
- *  - 公开 IPTV 源随时可能失效，请自行维护；结构随便改，App 自动按分组渲染。
+ * LinkTV v1.1.0 —— 频道目录与内置直播直链
+ *  · 目录内置：央视 20 / 卫视 36 / 全国 34 省级行政区地方台 126，共 182 个。
+ *  · 直播直链由程序内置并自动维护：启动时静默加载云端清单覆盖，
+ *    用户无需填写、导入或配置任何直播源，界面也不暴露「源」概念。
+ *  · 央视=央视官方 HLS；其余=公开直播清单自动匹配的可播直链。
+ *  · 个别频道暂无直链时显示品牌待播画面，云端清单更新后自动可用。
  */
+
+const OFFICIAL_SOURCES_URL = "https://cdn.jsdelivr.net/gh/wxadxmyz/LinkTV@main/data/sources.js";
+
+const BUILTIN_SOURCES = {
+  "CCTV-1 综合": "https://cctvcnch5ca.live.cctv.cn/whas/cctv1hd.m3u8",
+  "CCTV-2 财经": "https://cctvcnch5ca.live.cctv.cn/whas/cctv2hd.m3u8",
+  "CCTV-3 综艺": "https://cctvcnch5ca.live.cctv.cn/whas/cctv3hd.m3u8",
+  "CCTV-4 中文国际": "https://cctvcnch5ca.live.cctv.cn/whas/cctv4hd.m3u8",
+  "CCTV-5 体育": "https://cctvcnch5ca.live.cctv.cn/whas/cctv5hd.m3u8",
+  "CCTV-5+ 体育赛事": "https://cctvcnch5ca.live.cctv.cn/whas/cctv5phd.m3u8",
+  "CCTV-6 电影": "https://cctvcnch5ca.live.cctv.cn/whas/cctv6hd.m3u8",
+  "CCTV-7 国防军事": "https://cctvcnch5ca.live.cctv.cn/whas/cctv7hd.m3u8",
+  "CCTV-8 电视剧": "https://cctvcnch5ca.live.cctv.cn/whas/cctv8hd.m3u8",
+  "CCTV-9 纪录": "https://cctvcnch5ca.live.cctv.cn/whas/cctv9hd.m3u8",
+  "CCTV-10 科教": "https://cctvcnch5ca.live.cctv.cn/whas/cctv10hd.m3u8",
+  "CCTV-11 戏曲": "https://cctvcnch5ca.live.cctv.cn/whas/cctv11hd.m3u8",
+  "CCTV-12 社会与法": "https://cctvcnch5ca.live.cctv.cn/whas/cctv12hd.m3u8",
+  "CCTV-13 新闻": "https://cctvcnch5ca.live.cctv.cn/whas/cctv13hd.m3u8",
+  "CCTV-14 少儿": "https://cctvcnch5ca.live.cctv.cn/whas/cctv14hd.m3u8",
+  "CCTV-15 音乐": "https://cctvcnch5ca.live.cctv.cn/whas/cctv15hd.m3u8",
+  "CCTV-16 奥林匹克": "https://cctvcnch5ca.live.cctv.cn/whas/cctv16hd.m3u8",
+  "CCTV-17 农业农村": "https://cctvcnch5ca.live.cctv.cn/whas/cctv17hd.m3u8",
+  "CCTV-4 欧洲": "https://cctvcnch5ca.live.cctv.cn/whas/cctv4hd.m3u8",
+  "CCTV-4 美洲": "https://cctvcnch5ca.live.cctv.cn/whas/cctv4hd.m3u8",
+  "北京卫视": "http://go.bkpcp.top/mg/bjws",
+  "天津卫视": "http://39.134.115.163:8080/PLTV/88888910/224/3221225698/index.m3u8",
+  "河北卫视": "https://event.pull.hebtv.com/live/live101.m3u8",
+  "内蒙古卫视": "http://223.110.245.161/ott.js.chinamobile.com/PLTV/3/224/3221225836/index.m3u8",
+  "辽宁卫视": "http://39.134.39.37/PLTV/88888888/224/3221226209/index.m3u8",
+  "黑龙江卫视": "http://223.110.245.161/ott.js.chinamobile.com/PLTV/3/224/3221227492/index.m3u8",
+  "东方卫视": "https://restream.pdtvhd.com/memfs/0b1b95c9-3543-4af9-9fdb-cf45f1602f17.m3u8",
+  "江苏卫视": "http://39.134.24.166/dbiptv.sn.chinamobile.com/PLTV/88888890/224/3221226200/index.m3u8",
+  "浙江卫视": "http://39.134.115.163:8080/PLTV/88888910/224/3221225703/index.m3u8",
+  "安徽卫视": "https://restream.pdtvhd.com/memfs/c1cd2ed0-3b2b-4c25-af98-a7fb0b1eb130.m3u8",
+  "厦门卫视": "http://223.110.245.159/ott.js.chinamobile.com/PLTV/3/224/3221226996/index.m3u8",
+  "江西卫视": "http://39.134.115.163:8080/PLTV/88888910/224/3221225705/index.m3u8",
+  "山东卫视": "http://39.134.115.163:8080/PLTV/88888910/224/3221225697/index.m3u8",
+  "湖南卫视": "http://hlsal-ldvt.qing.mgtv.com/nn_live/nn_x64/dWlwPTEyNy4wLjAuMSZ1aWQ9cWluZy1jbXMmbm5fdGltZXpvbmU9OCZjZG5leF9pZD1hbF9obHNfbGR2dCZ1dWlkPTliODY4NmU5ZTM2YzYwMmMmZT02OTE0NjA0JnY9MSZpZD1ITldTWkdTVCZzPTcwN2RiYTc2YzJjNmJmMTQ4MmUyZGYzOWU2NWM3YWFi/HNWSZGST.m3u8",
+  "广东卫视": "https://h5cul1yar48um3t.wcetv.com/hls/gdtv.m3u8",
+  "深圳卫视": "http://39.134.24.166/dbiptv.sn.chinamobile.com/PLTV/88888890/224/3221226205/index.m3u8",
+  "四川卫视": "http://39.134.115.163:8080/PLTV/88888910/224/3221225733/index.m3u8",
+  "贵州卫视": "http://39.134.115.163:8080/PLTV/88888910/224/3221225728/index.m3u8",
+  "云南卫视": "https://hwapi.yunshicloud.com/8xughf/e0bx15.m3u8",
+  "西藏卫视": "http://39.134.115.163:8080/PLTV/88888910/224/3221225723/index.m3u8",
+  "陕西卫视": "http://39.134.115.163:8080/PLTV/88888910/224/3221225729/index.m3u8",
+  "青海卫视": "http://39.134.115.163:8080/PLTV/88888910/224/3221225727/index.m3u8",
+  "宁夏卫视": "http://39.134.115.163:8080/PLTV/88888910/224/3221225726/index.m3u8",
+  "新疆卫视": "http://39.134.115.163:8080/PLTV/88888910/224/3221225725/index.m3u8",
+  "凤凰卫视中文": "http://223.110.245.139/ott.js.chinamobile.com/PLTV/3/224/3221226922/index.m3u8",
+  "凤凰卫视资讯": "http://223.110.245.167/ott.js.chinamobile.com/PLTV/3/224/3221226923/index.m3u8",
+  "北京生活": "http://223.110.245.153/ott.js.chinamobile.com/PLTV/3/224/3221227311/index.m3u8",
+  "北京卡酷少儿": "http://223.111.191.105/downflv.brtvcloud.com/kkkkasd/winfr.m3u8",
+  "内蒙古蒙语": "http://223.110.245.161/ott.js.chinamobile.com/PLTV/3/224/3221225836/index.m3u8",
+  "黑龙江都市": "http://223.110.245.161/ott.js.chinamobile.com/PLTV/3/224/3221227492/index.m3u8",
+  "江苏城市": "http://223.110.245.143/ott.js.chinamobile.com/PLTV/3/224/3221225929/index.m3u8",
+  "江苏教育": "http://223.110.245.151/ott.js.chinamobile.com/PLTV/3/224/3221225923/index.m3u8",
+  "浙江民生休闲": "https://ali-m-l.cztv.com/channels/lantian/channel006/1080p.m3u8",
+  "山东齐鲁": "http://livealone302.iqilu.com/iqilu/qlpd.m3u8",
+  "山东农科": "http://livealone302.iqilu.com/iqilu/nkpd.m3u8",
+  "长沙新闻": "http://35848.hlsplay.aodianyun.com/guangdianyun_35848/tv_channel_346.m3u8",
+  "西安新闻": "http://stream2.xiancity.cn/xatv1/playlist.m3u8",
+  "澳广视": "https://live3.tdm.com.mo/ch6/hd_ch6.live/playlist.m3u8",
+};
 
 const CHANNEL_GROUPS = [
   {
     "name": "央视",
     "channels": [
-      {
-        "name": "CCTV-1 综合",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv1hd.m3u8"
-      },
-      {
-        "name": "CCTV-2 财经",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv2hd.m3u8"
-      },
-      {
-        "name": "CCTV-3 综艺",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv3hd.m3u8"
-      },
-      {
-        "name": "CCTV-4 中文国际",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv4hd.m3u8"
-      },
-      {
-        "name": "CCTV-5 体育",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv5hd.m3u8"
-      },
-      {
-        "name": "CCTV-5+ 体育赛事",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv5phd.m3u8"
-      },
-      {
-        "name": "CCTV-6 电影",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv6hd.m3u8"
-      },
-      {
-        "name": "CCTV-7 国防军事",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv7hd.m3u8"
-      },
-      {
-        "name": "CCTV-8 电视剧",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv8hd.m3u8"
-      },
-      {
-        "name": "CCTV-9 纪录",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv9hd.m3u8"
-      },
-      {
-        "name": "CCTV-10 科教",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv10hd.m3u8"
-      },
-      {
-        "name": "CCTV-11 戏曲",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv11hd.m3u8"
-      },
-      {
-        "name": "CCTV-12 社会与法",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv12hd.m3u8"
-      },
-      {
-        "name": "CCTV-13 新闻",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv13hd.m3u8"
-      },
-      {
-        "name": "CCTV-14 少儿",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv14hd.m3u8"
-      },
-      {
-        "name": "CCTV-15 音乐",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv15hd.m3u8"
-      },
-      {
-        "name": "CCTV-16 奥林匹克",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv16hd.m3u8"
-      },
-      {
-        "name": "CCTV-17 农业农村",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv17hd.m3u8"
-      },
-      {
-        "name": "CCTV-4 欧洲",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv4ouzhouhd.m3u8"
-      },
-      {
-        "name": "CCTV-4 美洲",
-        "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv4meizhouhd.m3u8"
-      }
+      {"name": "CCTV-1 综合", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv1hd.m3u8"},
+      {"name": "CCTV-2 财经", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv2hd.m3u8"},
+      {"name": "CCTV-3 综艺", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv3hd.m3u8"},
+      {"name": "CCTV-4 中文国际", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv4hd.m3u8"},
+      {"name": "CCTV-5 体育", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv5hd.m3u8"},
+      {"name": "CCTV-5+ 体育赛事", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv5phd.m3u8"},
+      {"name": "CCTV-6 电影", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv6hd.m3u8"},
+      {"name": "CCTV-7 国防军事", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv7hd.m3u8"},
+      {"name": "CCTV-8 电视剧", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv8hd.m3u8"},
+      {"name": "CCTV-9 纪录", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv9hd.m3u8"},
+      {"name": "CCTV-10 科教", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv10hd.m3u8"},
+      {"name": "CCTV-11 戏曲", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv11hd.m3u8"},
+      {"name": "CCTV-12 社会与法", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv12hd.m3u8"},
+      {"name": "CCTV-13 新闻", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv13hd.m3u8"},
+      {"name": "CCTV-14 少儿", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv14hd.m3u8"},
+      {"name": "CCTV-15 音乐", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv15hd.m3u8"},
+      {"name": "CCTV-16 奥林匹克", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv16hd.m3u8"},
+      {"name": "CCTV-17 农业农村", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv17hd.m3u8"},
+      {"name": "CCTV-4 欧洲", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv4hd.m3u8"},
+      {"name": "CCTV-4 美洲", "url": "https://cctvcnch5ca.live.cctv.cn/whas/cctv4hd.m3u8"}
     ]
   },
   {
     "name": "卫视",
     "channels": [
-      {
-        "name": "北京卫视",
-        "url": "",
-        "prov": "北京",
-        "region": "华北"
-      },
-      {
-        "name": "天津卫视",
-        "url": "",
-        "prov": "天津",
-        "region": "华北"
-      },
-      {
-        "name": "河北卫视",
-        "url": "",
-        "prov": "河北",
-        "region": "华北"
-      },
-      {
-        "name": "山西卫视",
-        "url": "",
-        "prov": "山西",
-        "region": "华北"
-      },
-      {
-        "name": "内蒙古卫视",
-        "url": "",
-        "prov": "内蒙古",
-        "region": "华北"
-      },
-      {
-        "name": "辽宁卫视",
-        "url": "",
-        "prov": "辽宁",
-        "region": "东北"
-      },
-      {
-        "name": "吉林卫视",
-        "url": "",
-        "prov": "吉林",
-        "region": "东北"
-      },
-      {
-        "name": "黑龙江卫视",
-        "url": "",
-        "prov": "黑龙江",
-        "region": "东北"
-      },
-      {
-        "name": "东方卫视",
-        "url": "",
-        "prov": "上海",
-        "region": "华东"
-      },
-      {
-        "name": "江苏卫视",
-        "url": "",
-        "prov": "江苏",
-        "region": "华东"
-      },
-      {
-        "name": "浙江卫视",
-        "url": "",
-        "prov": "浙江",
-        "region": "华东"
-      },
-      {
-        "name": "安徽卫视",
-        "url": "",
-        "prov": "安徽",
-        "region": "华东"
-      },
-      {
-        "name": "福建卫视",
-        "url": "",
-        "prov": "福建",
-        "region": "华东"
-      },
-      {
-        "name": "东南卫视",
-        "url": "",
-        "prov": "福建",
-        "region": "华东"
-      },
-      {
-        "name": "厦门卫视",
-        "url": "",
-        "prov": "福建",
-        "region": "华东"
-      },
-      {
-        "name": "江西卫视",
-        "url": "",
-        "prov": "江西",
-        "region": "华东"
-      },
-      {
-        "name": "山东卫视",
-        "url": "",
-        "prov": "山东",
-        "region": "华东"
-      },
-      {
-        "name": "河南卫视",
-        "url": "",
-        "prov": "河南",
-        "region": "华中"
-      },
-      {
-        "name": "湖北卫视",
-        "url": "",
-        "prov": "湖北",
-        "region": "华中"
-      },
-      {
-        "name": "湖南卫视",
-        "url": "",
-        "prov": "湖南",
-        "region": "华中"
-      },
-      {
-        "name": "广东卫视",
-        "url": "",
-        "prov": "广东",
-        "region": "华南"
-      },
-      {
-        "name": "深圳卫视",
-        "url": "",
-        "prov": "广东",
-        "region": "华南"
-      },
-      {
-        "name": "广西卫视",
-        "url": "",
-        "prov": "广西",
-        "region": "华南"
-      },
-      {
-        "name": "海南卫视",
-        "url": "",
-        "prov": "海南",
-        "region": "华南"
-      },
-      {
-        "name": "重庆卫视",
-        "url": "",
-        "prov": "重庆",
-        "region": "西南"
-      },
-      {
-        "name": "四川卫视",
-        "url": "",
-        "prov": "四川",
-        "region": "西南"
-      },
-      {
-        "name": "贵州卫视",
-        "url": "",
-        "prov": "贵州",
-        "region": "西南"
-      },
-      {
-        "name": "云南卫视",
-        "url": "",
-        "prov": "云南",
-        "region": "西南"
-      },
-      {
-        "name": "西藏卫视",
-        "url": "",
-        "prov": "西藏",
-        "region": "西南"
-      },
-      {
-        "name": "陕西卫视",
-        "url": "",
-        "prov": "陕西",
-        "region": "西北"
-      },
-      {
-        "name": "甘肃卫视",
-        "url": "",
-        "prov": "甘肃",
-        "region": "西北"
-      },
-      {
-        "name": "青海卫视",
-        "url": "",
-        "prov": "青海",
-        "region": "西北"
-      },
-      {
-        "name": "宁夏卫视",
-        "url": "",
-        "prov": "宁夏",
-        "region": "西北"
-      },
-      {
-        "name": "新疆卫视",
-        "url": "",
-        "prov": "新疆",
-        "region": "西北"
-      },
-      {
-        "name": "凤凰卫视中文",
-        "url": "",
-        "prov": "香港",
-        "region": "港澳台"
-      },
-      {
-        "name": "凤凰卫视资讯",
-        "url": "",
-        "prov": "香港",
-        "region": "港澳台"
-      }
+      {"name": "北京卫视", "url": "http://go.bkpcp.top/mg/bjws", "prov": "北京", "region": "华北"},
+      {"name": "天津卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225698/index.m3u8", "prov": "天津", "region": "华北"},
+      {"name": "河北卫视", "url": "https://event.pull.hebtv.com/live/live101.m3u8", "prov": "河北", "region": "华北"},
+      {"name": "山西卫视", "url": "", "prov": "山西", "region": "华北"},
+      {"name": "内蒙古卫视", "url": "http://223.110.245.161/ott.js.chinamobile.com/PLTV/3/224/3221225836/index.m3u8", "prov": "内蒙古", "region": "华北"},
+      {"name": "辽宁卫视", "url": "http://39.134.39.37/PLTV/88888888/224/3221226209/index.m3u8", "prov": "辽宁", "region": "东北"},
+      {"name": "吉林卫视", "url": "", "prov": "吉林", "region": "东北"},
+      {"name": "黑龙江卫视", "url": "http://223.110.245.161/ott.js.chinamobile.com/PLTV/3/224/3221227492/index.m3u8", "prov": "黑龙江", "region": "东北"},
+      {"name": "东方卫视", "url": "https://restream.pdtvhd.com/memfs/0b1b95c9-3543-4af9-9fdb-cf45f1602f17.m3u8", "prov": "上海", "region": "华东"},
+      {"name": "江苏卫视", "url": "http://39.134.24.166/dbiptv.sn.chinamobile.com/PLTV/88888890/224/3221226200/index.m3u8", "prov": "江苏", "region": "华东"},
+      {"name": "浙江卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225703/index.m3u8", "prov": "浙江", "region": "华东"},
+      {"name": "安徽卫视", "url": "https://restream.pdtvhd.com/memfs/c1cd2ed0-3b2b-4c25-af98-a7fb0b1eb130.m3u8", "prov": "安徽", "region": "华东"},
+      {"name": "福建卫视", "url": "", "prov": "福建", "region": "华东"},
+      {"name": "东南卫视", "url": "", "prov": "福建", "region": "华东"},
+      {"name": "厦门卫视", "url": "http://223.110.245.159/ott.js.chinamobile.com/PLTV/3/224/3221226996/index.m3u8", "prov": "福建", "region": "华东"},
+      {"name": "江西卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225705/index.m3u8", "prov": "江西", "region": "华东"},
+      {"name": "山东卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225697/index.m3u8", "prov": "山东", "region": "华东"},
+      {"name": "河南卫视", "url": "", "prov": "河南", "region": "华中"},
+      {"name": "湖北卫视", "url": "", "prov": "湖北", "region": "华中"},
+      {"name": "湖南卫视", "url": "http://hlsal-ldvt.qing.mgtv.com/nn_live/nn_x64/dWlwPTEyNy4wLjAuMSZ1aWQ9cWluZy1jbXMmbm5fdGltZXpvbmU9OCZjZG5leF9pZD1hbF9obHNfbGR2dCZ1dWlkPTliODY4NmU5ZTM2YzYwMmMmZT02OTE0NjA0JnY9MSZpZD1ITldTWkdTVCZzPTcwN2RiYTc2YzJjNmJmMTQ4MmUyZGYzOWU2NWM3YWFi/HNWSZGST.m3u8", "prov": "湖南", "region": "华中"},
+      {"name": "广东卫视", "url": "https://h5cul1yar48um3t.wcetv.com/hls/gdtv.m3u8", "prov": "广东", "region": "华南"},
+      {"name": "深圳卫视", "url": "http://39.134.24.166/dbiptv.sn.chinamobile.com/PLTV/88888890/224/3221226205/index.m3u8", "prov": "广东", "region": "华南"},
+      {"name": "广西卫视", "url": "", "prov": "广西", "region": "华南"},
+      {"name": "海南卫视", "url": "", "prov": "海南", "region": "华南"},
+      {"name": "重庆卫视", "url": "", "prov": "重庆", "region": "西南"},
+      {"name": "四川卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225733/index.m3u8", "prov": "四川", "region": "西南"},
+      {"name": "贵州卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225728/index.m3u8", "prov": "贵州", "region": "西南"},
+      {"name": "云南卫视", "url": "https://hwapi.yunshicloud.com/8xughf/e0bx15.m3u8", "prov": "云南", "region": "西南"},
+      {"name": "西藏卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225723/index.m3u8", "prov": "西藏", "region": "西南"},
+      {"name": "陕西卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225729/index.m3u8", "prov": "陕西", "region": "西北"},
+      {"name": "甘肃卫视", "url": "", "prov": "甘肃", "region": "西北"},
+      {"name": "青海卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225727/index.m3u8", "prov": "青海", "region": "西北"},
+      {"name": "宁夏卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225726/index.m3u8", "prov": "宁夏", "region": "西北"},
+      {"name": "新疆卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225725/index.m3u8", "prov": "新疆", "region": "西北"},
+      {"name": "凤凰卫视中文", "url": "http://223.110.245.139/ott.js.chinamobile.com/PLTV/3/224/3221226922/index.m3u8", "prov": "香港", "region": "港澳台"},
+      {"name": "凤凰卫视资讯", "url": "http://223.110.245.167/ott.js.chinamobile.com/PLTV/3/224/3221226923/index.m3u8", "prov": "香港", "region": "港澳台"}
     ]
   },
   {
     "name": "地方台",
     "channels": [
-      {
-        "name": "北京卫视",
-        "url": "",
-        "prov": "北京",
-        "region": "华北"
-      },
-      {
-        "name": "北京新闻",
-        "url": "",
-        "prov": "北京",
-        "region": "华北"
-      },
-      {
-        "name": "北京文艺",
-        "url": "",
-        "prov": "北京",
-        "region": "华北"
-      },
-      {
-        "name": "北京影视",
-        "url": "",
-        "prov": "北京",
-        "region": "华北"
-      },
-      {
-        "name": "北京科教",
-        "url": "",
-        "prov": "北京",
-        "region": "华北"
-      },
-      {
-        "name": "北京体育",
-        "url": "",
-        "prov": "北京",
-        "region": "华北"
-      },
-      {
-        "name": "北京生活",
-        "url": "",
-        "prov": "北京",
-        "region": "华北"
-      },
-      {
-        "name": "北京少儿",
-        "url": "",
-        "prov": "北京",
-        "region": "华北"
-      },
-      {
-        "name": "北京卡酷少儿",
-        "url": "",
-        "prov": "北京",
-        "region": "华北"
-      },
-      {
-        "name": "北京国际",
-        "url": "",
-        "prov": "北京",
-        "region": "华北"
-      },
-      {
-        "name": "天津卫视",
-        "url": "",
-        "prov": "天津",
-        "region": "华北"
-      },
-      {
-        "name": "天津新闻",
-        "url": "",
-        "prov": "天津",
-        "region": "华北"
-      },
-      {
-        "name": "天津文艺",
-        "url": "",
-        "prov": "天津",
-        "region": "华北"
-      },
-      {
-        "name": "天津都市",
-        "url": "",
-        "prov": "天津",
-        "region": "华北"
-      },
-      {
-        "name": "河北卫视",
-        "url": "",
-        "prov": "河北",
-        "region": "华北"
-      },
-      {
-        "name": "河北经济",
-        "url": "",
-        "prov": "河北",
-        "region": "华北"
-      },
-      {
-        "name": "河北农民",
-        "url": "",
-        "prov": "河北",
-        "region": "华北"
-      },
-      {
-        "name": "石家庄新闻",
-        "url": "",
-        "prov": "河北",
-        "region": "华北"
-      },
-      {
-        "name": "山西卫视",
-        "url": "",
-        "prov": "山西",
-        "region": "华北"
-      },
-      {
-        "name": "山西科教",
-        "url": "",
-        "prov": "山西",
-        "region": "华北"
-      },
-      {
-        "name": "太原新闻",
-        "url": "",
-        "prov": "山西",
-        "region": "华北"
-      },
-      {
-        "name": "内蒙古卫视",
-        "url": "",
-        "prov": "内蒙古",
-        "region": "华北"
-      },
-      {
-        "name": "内蒙古蒙语",
-        "url": "",
-        "prov": "内蒙古",
-        "region": "华北"
-      },
-      {
-        "name": "呼和浩特新闻",
-        "url": "",
-        "prov": "内蒙古",
-        "region": "华北"
-      },
-      {
-        "name": "辽宁卫视",
-        "url": "",
-        "prov": "辽宁",
-        "region": "东北"
-      },
-      {
-        "name": "辽宁都市",
-        "url": "",
-        "prov": "辽宁",
-        "region": "东北"
-      },
-      {
-        "name": "大连新闻",
-        "url": "",
-        "prov": "辽宁",
-        "region": "东北"
-      },
-      {
-        "name": "吉林卫视",
-        "url": "",
-        "prov": "吉林",
-        "region": "东北"
-      },
-      {
-        "name": "吉林乡村",
-        "url": "",
-        "prov": "吉林",
-        "region": "东北"
-      },
-      {
-        "name": "长春新闻",
-        "url": "",
-        "prov": "吉林",
-        "region": "东北"
-      },
-      {
-        "name": "黑龙江卫视",
-        "url": "",
-        "prov": "黑龙江",
-        "region": "东北"
-      },
-      {
-        "name": "黑龙江都市",
-        "url": "",
-        "prov": "黑龙江",
-        "region": "东北"
-      },
-      {
-        "name": "哈尔滨新闻",
-        "url": "",
-        "prov": "黑龙江",
-        "region": "东北"
-      },
-      {
-        "name": "东方卫视",
-        "url": "",
-        "prov": "上海",
-        "region": "华东"
-      },
-      {
-        "name": "上海新闻综合",
-        "url": "",
-        "prov": "上海",
-        "region": "华东"
-      },
-      {
-        "name": "上海娱乐",
-        "url": "",
-        "prov": "上海",
-        "region": "华东"
-      },
-      {
-        "name": "上海戏剧",
-        "url": "",
-        "prov": "上海",
-        "region": "华东"
-      },
-      {
-        "name": "上海纪实",
-        "url": "",
-        "prov": "上海",
-        "region": "华东"
-      },
-      {
-        "name": "上海东方影视",
-        "url": "",
-        "prov": "上海",
-        "region": "华东"
-      },
-      {
-        "name": "江苏卫视",
-        "url": "",
-        "prov": "江苏",
-        "region": "华东"
-      },
-      {
-        "name": "江苏城市",
-        "url": "",
-        "prov": "江苏",
-        "region": "华东"
-      },
-      {
-        "name": "江苏教育",
-        "url": "",
-        "prov": "江苏",
-        "region": "华东"
-      },
-      {
-        "name": "南京新闻",
-        "url": "",
-        "prov": "江苏",
-        "region": "华东"
-      },
-      {
-        "name": "浙江卫视",
-        "url": "",
-        "prov": "浙江",
-        "region": "华东"
-      },
-      {
-        "name": "浙江民生休闲",
-        "url": "",
-        "prov": "浙江",
-        "region": "华东"
-      },
-      {
-        "name": "浙江少儿",
-        "url": "",
-        "prov": "浙江",
-        "region": "华东"
-      },
-      {
-        "name": "杭州综合",
-        "url": "",
-        "prov": "浙江",
-        "region": "华东"
-      },
-      {
-        "name": "安徽卫视",
-        "url": "",
-        "prov": "安徽",
-        "region": "华东"
-      },
-      {
-        "name": "安徽经济",
-        "url": "",
-        "prov": "安徽",
-        "region": "华东"
-      },
-      {
-        "name": "安徽公共",
-        "url": "",
-        "prov": "安徽",
-        "region": "华东"
-      },
-      {
-        "name": "福建卫视",
-        "url": "",
-        "prov": "福建",
-        "region": "华东"
-      },
-      {
-        "name": "东南卫视",
-        "url": "",
-        "prov": "福建",
-        "region": "华东"
-      },
-      {
-        "name": "福建新闻",
-        "url": "",
-        "prov": "福建",
-        "region": "华东"
-      },
-      {
-        "name": "厦门卫视",
-        "url": "",
-        "prov": "福建",
-        "region": "华东"
-      },
-      {
-        "name": "江西卫视",
-        "url": "",
-        "prov": "江西",
-        "region": "华东"
-      },
-      {
-        "name": "江西都市",
-        "url": "",
-        "prov": "江西",
-        "region": "华东"
-      },
-      {
-        "name": "南昌新闻",
-        "url": "",
-        "prov": "江西",
-        "region": "华东"
-      },
-      {
-        "name": "山东卫视",
-        "url": "",
-        "prov": "山东",
-        "region": "华东"
-      },
-      {
-        "name": "山东齐鲁",
-        "url": "",
-        "prov": "山东",
-        "region": "华东"
-      },
-      {
-        "name": "山东农科",
-        "url": "",
-        "prov": "山东",
-        "region": "华东"
-      },
-      {
-        "name": "济南新闻",
-        "url": "",
-        "prov": "山东",
-        "region": "华东"
-      },
-      {
-        "name": "河南卫视",
-        "url": "",
-        "prov": "河南",
-        "region": "华中"
-      },
-      {
-        "name": "河南都市",
-        "url": "",
-        "prov": "河南",
-        "region": "华中"
-      },
-      {
-        "name": "河南新闻",
-        "url": "",
-        "prov": "河南",
-        "region": "华中"
-      },
-      {
-        "name": "湖北卫视",
-        "url": "",
-        "prov": "湖北",
-        "region": "华中"
-      },
-      {
-        "name": "湖北综合",
-        "url": "",
-        "prov": "湖北",
-        "region": "华中"
-      },
-      {
-        "name": "武汉新闻",
-        "url": "",
-        "prov": "湖北",
-        "region": "华中"
-      },
-      {
-        "name": "湖南卫视",
-        "url": "",
-        "prov": "湖南",
-        "region": "华中"
-      },
-      {
-        "name": "湖南经视",
-        "url": "",
-        "prov": "湖南",
-        "region": "华中"
-      },
-      {
-        "name": "湖南娱乐",
-        "url": "",
-        "prov": "湖南",
-        "region": "华中"
-      },
-      {
-        "name": "湖南都市",
-        "url": "",
-        "prov": "湖南",
-        "region": "华中"
-      },
-      {
-        "name": "长沙新闻",
-        "url": "",
-        "prov": "湖南",
-        "region": "华中"
-      },
-      {
-        "name": "广东卫视",
-        "url": "",
-        "prov": "广东",
-        "region": "华南"
-      },
-      {
-        "name": "广东珠江",
-        "url": "",
-        "prov": "广东",
-        "region": "华南"
-      },
-      {
-        "name": "广东新闻",
-        "url": "",
-        "prov": "广东",
-        "region": "华南"
-      },
-      {
-        "name": "广州综合",
-        "url": "",
-        "prov": "广东",
-        "region": "华南"
-      },
-      {
-        "name": "深圳卫视",
-        "url": "",
-        "prov": "广东",
-        "region": "华南"
-      },
-      {
-        "name": "深圳都市",
-        "url": "",
-        "prov": "广东",
-        "region": "华南"
-      },
-      {
-        "name": "深圳财经",
-        "url": "",
-        "prov": "广东",
-        "region": "华南"
-      },
-      {
-        "name": "广西卫视",
-        "url": "",
-        "prov": "广西",
-        "region": "华南"
-      },
-      {
-        "name": "广西都市",
-        "url": "",
-        "prov": "广西",
-        "region": "华南"
-      },
-      {
-        "name": "南宁新闻",
-        "url": "",
-        "prov": "广西",
-        "region": "华南"
-      },
-      {
-        "name": "海南卫视",
-        "url": "",
-        "prov": "海南",
-        "region": "华南"
-      },
-      {
-        "name": "海南新闻",
-        "url": "",
-        "prov": "海南",
-        "region": "华南"
-      },
-      {
-        "name": "海口新闻",
-        "url": "",
-        "prov": "海南",
-        "region": "华南"
-      },
-      {
-        "name": "重庆卫视",
-        "url": "",
-        "prov": "重庆",
-        "region": "西南"
-      },
-      {
-        "name": "重庆新闻",
-        "url": "",
-        "prov": "重庆",
-        "region": "西南"
-      },
-      {
-        "name": "重庆影视",
-        "url": "",
-        "prov": "重庆",
-        "region": "西南"
-      },
-      {
-        "name": "四川卫视",
-        "url": "",
-        "prov": "四川",
-        "region": "西南"
-      },
-      {
-        "name": "四川文化旅游",
-        "url": "",
-        "prov": "四川",
-        "region": "西南"
-      },
-      {
-        "name": "成都新闻",
-        "url": "",
-        "prov": "四川",
-        "region": "西南"
-      },
-      {
-        "name": "贵州卫视",
-        "url": "",
-        "prov": "贵州",
-        "region": "西南"
-      },
-      {
-        "name": "贵州新闻",
-        "url": "",
-        "prov": "贵州",
-        "region": "西南"
-      },
-      {
-        "name": "贵阳新闻",
-        "url": "",
-        "prov": "贵州",
-        "region": "西南"
-      },
-      {
-        "name": "云南卫视",
-        "url": "",
-        "prov": "云南",
-        "region": "西南"
-      },
-      {
-        "name": "云南都市",
-        "url": "",
-        "prov": "云南",
-        "region": "西南"
-      },
-      {
-        "name": "昆明新闻",
-        "url": "",
-        "prov": "云南",
-        "region": "西南"
-      },
-      {
-        "name": "西藏卫视",
-        "url": "",
-        "prov": "西藏",
-        "region": "西南"
-      },
-      {
-        "name": "西藏藏语",
-        "url": "",
-        "prov": "西藏",
-        "region": "西南"
-      },
-      {
-        "name": "拉萨新闻",
-        "url": "",
-        "prov": "西藏",
-        "region": "西南"
-      },
-      {
-        "name": "陕西卫视",
-        "url": "",
-        "prov": "陕西",
-        "region": "西北"
-      },
-      {
-        "name": "陕西新闻",
-        "url": "",
-        "prov": "陕西",
-        "region": "西北"
-      },
-      {
-        "name": "西安新闻",
-        "url": "",
-        "prov": "陕西",
-        "region": "西北"
-      },
-      {
-        "name": "甘肃卫视",
-        "url": "",
-        "prov": "甘肃",
-        "region": "西北"
-      },
-      {
-        "name": "甘肃都市",
-        "url": "",
-        "prov": "甘肃",
-        "region": "西北"
-      },
-      {
-        "name": "兰州新闻",
-        "url": "",
-        "prov": "甘肃",
-        "region": "西北"
-      },
-      {
-        "name": "青海卫视",
-        "url": "",
-        "prov": "青海",
-        "region": "西北"
-      },
-      {
-        "name": "青海新闻",
-        "url": "",
-        "prov": "青海",
-        "region": "西北"
-      },
-      {
-        "name": "西宁新闻",
-        "url": "",
-        "prov": "青海",
-        "region": "西北"
-      },
-      {
-        "name": "宁夏卫视",
-        "url": "",
-        "prov": "宁夏",
-        "region": "西北"
-      },
-      {
-        "name": "宁夏公共",
-        "url": "",
-        "prov": "宁夏",
-        "region": "西北"
-      },
-      {
-        "name": "银川新闻",
-        "url": "",
-        "prov": "宁夏",
-        "region": "西北"
-      },
-      {
-        "name": "新疆卫视",
-        "url": "",
-        "prov": "新疆",
-        "region": "西北"
-      },
-      {
-        "name": "新疆维语",
-        "url": "",
-        "prov": "新疆",
-        "region": "西北"
-      },
-      {
-        "name": "乌鲁木齐新闻",
-        "url": "",
-        "prov": "新疆",
-        "region": "西北"
-      },
-      {
-        "name": "翡翠台",
-        "url": "",
-        "prov": "香港",
-        "region": "港澳台"
-      },
-      {
-        "name": "明珠台",
-        "url": "",
-        "prov": "香港",
-        "region": "港澳台"
-      },
-      {
-        "name": "无线新闻台",
-        "url": "",
-        "prov": "香港",
-        "region": "港澳台"
-      },
-      {
-        "name": "凤凰卫视中文",
-        "url": "",
-        "prov": "香港",
-        "region": "港澳台"
-      },
-      {
-        "name": "凤凰卫视资讯",
-        "url": "",
-        "prov": "香港",
-        "region": "港澳台"
-      },
-      {
-        "name": "澳广视",
-        "url": "",
-        "prov": "澳门",
-        "region": "港澳台"
-      },
-      {
-        "name": "澳门综艺",
-        "url": "",
-        "prov": "澳门",
-        "region": "港澳台"
-      },
-      {
-        "name": "台视",
-        "url": "",
-        "prov": "台湾",
-        "region": "港澳台"
-      },
-      {
-        "name": "中视",
-        "url": "",
-        "prov": "台湾",
-        "region": "港澳台"
-      },
-      {
-        "name": "华视",
-        "url": "",
-        "prov": "台湾",
-        "region": "港澳台"
-      },
-      {
-        "name": "民视",
-        "url": "",
-        "prov": "台湾",
-        "region": "港澳台"
-      }
+      {"name": "北京卫视", "url": "http://go.bkpcp.top/mg/bjws", "prov": "北京", "region": "华北"},
+      {"name": "北京新闻", "url": "", "prov": "北京", "region": "华北"},
+      {"name": "北京文艺", "url": "", "prov": "北京", "region": "华北"},
+      {"name": "北京影视", "url": "", "prov": "北京", "region": "华北"},
+      {"name": "北京科教", "url": "", "prov": "北京", "region": "华北"},
+      {"name": "北京体育", "url": "", "prov": "北京", "region": "华北"},
+      {"name": "北京生活", "url": "http://223.110.245.153/ott.js.chinamobile.com/PLTV/3/224/3221227311/index.m3u8", "prov": "北京", "region": "华北"},
+      {"name": "北京少儿", "url": "", "prov": "北京", "region": "华北"},
+      {"name": "北京卡酷少儿", "url": "http://223.111.191.105/downflv.brtvcloud.com/kkkkasd/winfr.m3u8", "prov": "北京", "region": "华北"},
+      {"name": "北京国际", "url": "", "prov": "北京", "region": "华北"},
+      {"name": "天津卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225698/index.m3u8", "prov": "天津", "region": "华北"},
+      {"name": "天津新闻", "url": "", "prov": "天津", "region": "华北"},
+      {"name": "天津文艺", "url": "", "prov": "天津", "region": "华北"},
+      {"name": "天津都市", "url": "", "prov": "天津", "region": "华北"},
+      {"name": "河北卫视", "url": "https://event.pull.hebtv.com/live/live101.m3u8", "prov": "河北", "region": "华北"},
+      {"name": "河北经济", "url": "", "prov": "河北", "region": "华北"},
+      {"name": "河北农民", "url": "", "prov": "河北", "region": "华北"},
+      {"name": "石家庄新闻", "url": "", "prov": "河北", "region": "华北"},
+      {"name": "山西卫视", "url": "", "prov": "山西", "region": "华北"},
+      {"name": "山西科教", "url": "", "prov": "山西", "region": "华北"},
+      {"name": "太原新闻", "url": "", "prov": "山西", "region": "华北"},
+      {"name": "内蒙古卫视", "url": "http://223.110.245.161/ott.js.chinamobile.com/PLTV/3/224/3221225836/index.m3u8", "prov": "内蒙古", "region": "华北"},
+      {"name": "内蒙古蒙语", "url": "http://223.110.245.161/ott.js.chinamobile.com/PLTV/3/224/3221225836/index.m3u8", "prov": "内蒙古", "region": "华北"},
+      {"name": "呼和浩特新闻", "url": "", "prov": "内蒙古", "region": "华北"},
+      {"name": "辽宁卫视", "url": "http://39.134.39.37/PLTV/88888888/224/3221226209/index.m3u8", "prov": "辽宁", "region": "东北"},
+      {"name": "辽宁都市", "url": "", "prov": "辽宁", "region": "东北"},
+      {"name": "大连新闻", "url": "", "prov": "辽宁", "region": "东北"},
+      {"name": "吉林卫视", "url": "", "prov": "吉林", "region": "东北"},
+      {"name": "吉林乡村", "url": "", "prov": "吉林", "region": "东北"},
+      {"name": "长春新闻", "url": "", "prov": "吉林", "region": "东北"},
+      {"name": "黑龙江卫视", "url": "http://223.110.245.161/ott.js.chinamobile.com/PLTV/3/224/3221227492/index.m3u8", "prov": "黑龙江", "region": "东北"},
+      {"name": "黑龙江都市", "url": "http://223.110.245.161/ott.js.chinamobile.com/PLTV/3/224/3221227492/index.m3u8", "prov": "黑龙江", "region": "东北"},
+      {"name": "哈尔滨新闻", "url": "", "prov": "黑龙江", "region": "东北"},
+      {"name": "东方卫视", "url": "https://restream.pdtvhd.com/memfs/0b1b95c9-3543-4af9-9fdb-cf45f1602f17.m3u8", "prov": "上海", "region": "华东"},
+      {"name": "上海新闻综合", "url": "", "prov": "上海", "region": "华东"},
+      {"name": "上海娱乐", "url": "", "prov": "上海", "region": "华东"},
+      {"name": "上海戏剧", "url": "", "prov": "上海", "region": "华东"},
+      {"name": "上海纪实", "url": "", "prov": "上海", "region": "华东"},
+      {"name": "上海东方影视", "url": "", "prov": "上海", "region": "华东"},
+      {"name": "江苏卫视", "url": "http://39.134.24.166/dbiptv.sn.chinamobile.com/PLTV/88888890/224/3221226200/index.m3u8", "prov": "江苏", "region": "华东"},
+      {"name": "江苏城市", "url": "http://223.110.245.143/ott.js.chinamobile.com/PLTV/3/224/3221225929/index.m3u8", "prov": "江苏", "region": "华东"},
+      {"name": "江苏教育", "url": "http://223.110.245.151/ott.js.chinamobile.com/PLTV/3/224/3221225923/index.m3u8", "prov": "江苏", "region": "华东"},
+      {"name": "南京新闻", "url": "", "prov": "江苏", "region": "华东"},
+      {"name": "浙江卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225703/index.m3u8", "prov": "浙江", "region": "华东"},
+      {"name": "浙江民生休闲", "url": "https://ali-m-l.cztv.com/channels/lantian/channel006/1080p.m3u8", "prov": "浙江", "region": "华东"},
+      {"name": "浙江少儿", "url": "", "prov": "浙江", "region": "华东"},
+      {"name": "杭州综合", "url": "", "prov": "浙江", "region": "华东"},
+      {"name": "安徽卫视", "url": "https://restream.pdtvhd.com/memfs/c1cd2ed0-3b2b-4c25-af98-a7fb0b1eb130.m3u8", "prov": "安徽", "region": "华东"},
+      {"name": "安徽经济", "url": "", "prov": "安徽", "region": "华东"},
+      {"name": "安徽公共", "url": "", "prov": "安徽", "region": "华东"},
+      {"name": "福建卫视", "url": "", "prov": "福建", "region": "华东"},
+      {"name": "东南卫视", "url": "", "prov": "福建", "region": "华东"},
+      {"name": "福建新闻", "url": "", "prov": "福建", "region": "华东"},
+      {"name": "厦门卫视", "url": "http://223.110.245.159/ott.js.chinamobile.com/PLTV/3/224/3221226996/index.m3u8", "prov": "福建", "region": "华东"},
+      {"name": "江西卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225705/index.m3u8", "prov": "江西", "region": "华东"},
+      {"name": "江西都市", "url": "", "prov": "江西", "region": "华东"},
+      {"name": "南昌新闻", "url": "", "prov": "江西", "region": "华东"},
+      {"name": "山东卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225697/index.m3u8", "prov": "山东", "region": "华东"},
+      {"name": "山东齐鲁", "url": "http://livealone302.iqilu.com/iqilu/qlpd.m3u8", "prov": "山东", "region": "华东"},
+      {"name": "山东农科", "url": "http://livealone302.iqilu.com/iqilu/nkpd.m3u8", "prov": "山东", "region": "华东"},
+      {"name": "济南新闻", "url": "", "prov": "山东", "region": "华东"},
+      {"name": "河南卫视", "url": "", "prov": "河南", "region": "华中"},
+      {"name": "河南都市", "url": "", "prov": "河南", "region": "华中"},
+      {"name": "河南新闻", "url": "", "prov": "河南", "region": "华中"},
+      {"name": "湖北卫视", "url": "", "prov": "湖北", "region": "华中"},
+      {"name": "湖北综合", "url": "", "prov": "湖北", "region": "华中"},
+      {"name": "武汉新闻", "url": "", "prov": "湖北", "region": "华中"},
+      {"name": "湖南卫视", "url": "http://hlsal-ldvt.qing.mgtv.com/nn_live/nn_x64/dWlwPTEyNy4wLjAuMSZ1aWQ9cWluZy1jbXMmbm5fdGltZXpvbmU9OCZjZG5leF9pZD1hbF9obHNfbGR2dCZ1dWlkPTliODY4NmU5ZTM2YzYwMmMmZT02OTE0NjA0JnY9MSZpZD1ITldTWkdTVCZzPTcwN2RiYTc2YzJjNmJmMTQ4MmUyZGYzOWU2NWM3YWFi/HNWSZGST.m3u8", "prov": "湖南", "region": "华中"},
+      {"name": "湖南经视", "url": "", "prov": "湖南", "region": "华中"},
+      {"name": "湖南娱乐", "url": "", "prov": "湖南", "region": "华中"},
+      {"name": "湖南都市", "url": "", "prov": "湖南", "region": "华中"},
+      {"name": "长沙新闻", "url": "http://35848.hlsplay.aodianyun.com/guangdianyun_35848/tv_channel_346.m3u8", "prov": "湖南", "region": "华中"},
+      {"name": "广东卫视", "url": "https://h5cul1yar48um3t.wcetv.com/hls/gdtv.m3u8", "prov": "广东", "region": "华南"},
+      {"name": "广东珠江", "url": "", "prov": "广东", "region": "华南"},
+      {"name": "广东新闻", "url": "", "prov": "广东", "region": "华南"},
+      {"name": "广州综合", "url": "", "prov": "广东", "region": "华南"},
+      {"name": "深圳卫视", "url": "http://39.134.24.166/dbiptv.sn.chinamobile.com/PLTV/88888890/224/3221226205/index.m3u8", "prov": "广东", "region": "华南"},
+      {"name": "深圳都市", "url": "", "prov": "广东", "region": "华南"},
+      {"name": "深圳财经", "url": "", "prov": "广东", "region": "华南"},
+      {"name": "广西卫视", "url": "", "prov": "广西", "region": "华南"},
+      {"name": "广西都市", "url": "", "prov": "广西", "region": "华南"},
+      {"name": "南宁新闻", "url": "", "prov": "广西", "region": "华南"},
+      {"name": "海南卫视", "url": "", "prov": "海南", "region": "华南"},
+      {"name": "海南新闻", "url": "", "prov": "海南", "region": "华南"},
+      {"name": "海口新闻", "url": "", "prov": "海南", "region": "华南"},
+      {"name": "重庆卫视", "url": "", "prov": "重庆", "region": "西南"},
+      {"name": "重庆新闻", "url": "", "prov": "重庆", "region": "西南"},
+      {"name": "重庆影视", "url": "", "prov": "重庆", "region": "西南"},
+      {"name": "四川卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225733/index.m3u8", "prov": "四川", "region": "西南"},
+      {"name": "四川文化旅游", "url": "", "prov": "四川", "region": "西南"},
+      {"name": "成都新闻", "url": "", "prov": "四川", "region": "西南"},
+      {"name": "贵州卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225728/index.m3u8", "prov": "贵州", "region": "西南"},
+      {"name": "贵州新闻", "url": "", "prov": "贵州", "region": "西南"},
+      {"name": "贵阳新闻", "url": "", "prov": "贵州", "region": "西南"},
+      {"name": "云南卫视", "url": "https://hwapi.yunshicloud.com/8xughf/e0bx15.m3u8", "prov": "云南", "region": "西南"},
+      {"name": "云南都市", "url": "", "prov": "云南", "region": "西南"},
+      {"name": "昆明新闻", "url": "", "prov": "云南", "region": "西南"},
+      {"name": "西藏卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225723/index.m3u8", "prov": "西藏", "region": "西南"},
+      {"name": "西藏藏语", "url": "", "prov": "西藏", "region": "西南"},
+      {"name": "拉萨新闻", "url": "", "prov": "西藏", "region": "西南"},
+      {"name": "陕西卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225729/index.m3u8", "prov": "陕西", "region": "西北"},
+      {"name": "陕西新闻", "url": "", "prov": "陕西", "region": "西北"},
+      {"name": "西安新闻", "url": "http://stream2.xiancity.cn/xatv1/playlist.m3u8", "prov": "陕西", "region": "西北"},
+      {"name": "甘肃卫视", "url": "", "prov": "甘肃", "region": "西北"},
+      {"name": "甘肃都市", "url": "", "prov": "甘肃", "region": "西北"},
+      {"name": "兰州新闻", "url": "", "prov": "甘肃", "region": "西北"},
+      {"name": "青海卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225727/index.m3u8", "prov": "青海", "region": "西北"},
+      {"name": "青海新闻", "url": "", "prov": "青海", "region": "西北"},
+      {"name": "西宁新闻", "url": "", "prov": "青海", "region": "西北"},
+      {"name": "宁夏卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225726/index.m3u8", "prov": "宁夏", "region": "西北"},
+      {"name": "宁夏公共", "url": "", "prov": "宁夏", "region": "西北"},
+      {"name": "银川新闻", "url": "", "prov": "宁夏", "region": "西北"},
+      {"name": "新疆卫视", "url": "http://39.134.115.163:8080/PLTV/88888910/224/3221225725/index.m3u8", "prov": "新疆", "region": "西北"},
+      {"name": "新疆维语", "url": "", "prov": "新疆", "region": "西北"},
+      {"name": "乌鲁木齐新闻", "url": "", "prov": "新疆", "region": "西北"},
+      {"name": "翡翠台", "url": "", "prov": "香港", "region": "港澳台"},
+      {"name": "明珠台", "url": "", "prov": "香港", "region": "港澳台"},
+      {"name": "无线新闻台", "url": "", "prov": "香港", "region": "港澳台"},
+      {"name": "凤凰卫视中文", "url": "http://223.110.245.139/ott.js.chinamobile.com/PLTV/3/224/3221226922/index.m3u8", "prov": "香港", "region": "港澳台"},
+      {"name": "凤凰卫视资讯", "url": "http://223.110.245.167/ott.js.chinamobile.com/PLTV/3/224/3221226923/index.m3u8", "prov": "香港", "region": "港澳台"},
+      {"name": "澳广视", "url": "https://live3.tdm.com.mo/ch6/hd_ch6.live/playlist.m3u8", "prov": "澳门", "region": "港澳台"},
+      {"name": "澳门综艺", "url": "", "prov": "澳门", "region": "港澳台"},
+      {"name": "台视", "url": "", "prov": "台湾", "region": "港澳台"},
+      {"name": "中视", "url": "", "prov": "台湾", "region": "港澳台"},
+      {"name": "华视", "url": "", "prov": "台湾", "region": "港澳台"},
+      {"name": "民视", "url": "", "prov": "台湾", "region": "港澳台"}
     ]
   }
 ];
 
-// 可选：一个远程 M3U 播放列表地址，App 启动时可一键拉取合并。留空则不使用。
-const REMOTE_M3U_URL = "";
-
 window.CHANNEL_GROUPS = CHANNEL_GROUPS;
-window.REMOTE_M3U_URL = REMOTE_M3U_URL;
+window.BUILTIN_SOURCES = BUILTIN_SOURCES;
+window.OFFICIAL_SOURCES_URL = OFFICIAL_SOURCES_URL;
