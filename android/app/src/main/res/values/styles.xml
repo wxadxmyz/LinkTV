@@ -3,6 +3,10 @@
     <style name="Theme.LinkTV" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowFullscreen">true</item>
         <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <!-- 启动窗口直接黑底，避免部分电视在 WebView 首帧前闪出白色方块 -->
+        <item name="android:windowBackground">@android:color/black</item>
         <item name="android:statusBarColor">#000000</item>
         <item name="android:navigationBarColor">#000000</item>
         <item name="android:colorBackground">#000000</item>

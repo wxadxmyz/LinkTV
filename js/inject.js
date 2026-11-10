@@ -1,5 +1,5 @@
 /**
- * LinkTV v1.2.0 —— 官方直播页注入层（核心）
+ * LinkTV v1.3.0 —— 官方直播页注入层（核心）
  *
  * 由 MainActivity 在页面加载完成后注入到「央视频官方直播页」的 WebView 上下文中。
  *  1. clean()：只保留官方页面自己的 <video>，隐藏浮层/导航/节目单，把画面钉成全屏
@@ -13,13 +13,31 @@
  */
 (function () {
   "use strict";
-  if (window.__LINKTV_BOOTED__) return;
-  window.__LINKTV_BOOTED__ = true;
+  // v1.3.0：模式由原生明确指定（拼接在注入脚本最前面），不再用 hostname 猜测。
+  // v1.2.0 的 bug：MainActivity 在 onPageStarted 就注入，此刻 location.hostname 为空，
+  // 被误判成 DEMO，且 __LINKTV_BOOTED__ 开头即锁死 → clean()/看门狗全不执行，
+  // 电视上就露出央视频官网原貌 + 黑屏。手机因时序侥幸命中正常分支。
+  var MODE = window.__LINKTV_MODE__ === "tv" ? "tv" : "demo";
+  var DEMO = (MODE !== "tv");
+  var READY_KEY = "ready:" + MODE;
+  // 只有 boot() 完整成功才置 ready；且标记带模式 —— 若上一轮误判成 demo、
+  // 这一轮以 tv 重注入时必须能重新 boot，绝不能被幂等锁挡死。
+  if (window.__LINKTV_BOOTED__ === READY_KEY) return;
+  // 同一文档内重注入（boot 抛错时）：先清掉上一轮的定时器/观察器，避免累积
+  if (window.__LINKTV_CLEANUP__) { try { window.__LINKTV_CLEANUP__(); } catch (e) {} }
+  var IVS = [], OBS = [];
+  var MY_TOKEN = String(Date.now()) + "_" + Math.floor(Math.random() * 1e6);
+  window.__LINKTV_CLEANUP__ = function () {
+    IVS.forEach(function (id) { try { clearInterval(id); } catch (e) {} });
+    OBS.forEach(function (o) { try { o.disconnect(); } catch (e) {} });
+    IVS = []; OBS = [];
+  };
 
   var CFG = window.LINKTV_CHANNELS || { GROUPS: [], flatten: function () { return []; } };
   var HOME = CFG.HOME || "https://www.yangshipin.cn/tv/home";
   var BACKUP = CFG.BACKUP_HOME || "https://tv.cctv.com/live/";
-  var DEMO = !/yangshipin\.cn|cctv\.com/.test(location.hostname);
+  var FIT = window.__LINKTV_FIT__ || "cover";   // 铺满屏幕（v1.2.0 是 contain，四周留黑边）
+  var CLEAN_COUNT = 0;
 
   // ---------------- 存储桥（Java SharedPreferences，降级 localStorage，跨页面/跨域） ----------------
   // 约定：字符串原样存（Java 侧也能直接读频道名）；数组/对象存 JSON 字符串，读回时解析
@@ -150,6 +168,9 @@
 
   // ---------------- UI ----------------
   function buildUI() {
+    // 可重入：原生重试注入时先移除上一次的 UI，避免叠层
+    var prev = document.getElementById("ltv-ui");
+    if (prev && prev.parentNode) prev.parentNode.removeChild(prev);
     var root = el("div");
     root.id = "ltv-ui";
     root.setAttribute("data-ltv-ui", "1");
@@ -194,12 +215,18 @@
 
     // 面板背景点击收起
     UI.panel.addEventListener("click", function (e) { if (e.target === UI.panel) closePanel(); });
-    // 全屏点击呼出面板（触屏 / demo）。换台时页面内合成点击需抑制，避免刚收起又弹出
-    document.addEventListener("click", function (e) {
+    // 全屏点击呼出面板（触屏 / demo）。只绑一次，避免原生重试注入导致重复绑定
+    if (!window.__LINKTV_DOC_CLICK__) {
+      window.__LINKTV_DOC_CLICK__ = true;
+      document.addEventListener("click", function (e) {
+        if (window.__LINKTV_DOC_CLICK_HANDLER__) window.__LINKTV_DOC_CLICK_HANDLER__(e);
+      }, true);
+    }
+    window.__LINKTV_DOC_CLICK_HANDLER__ = function (e) {
       if (Date.now() < ST.suppressDocClick) return;
-      if (root.contains(e.target)) return;
+      if (root.contains && root.contains(e.target)) return;
       if (!ST.panel) openPanel();
-    });
+    };
   }
 
   // ---------------- 页面清理：只留官方 video，钉全屏 ----------------
@@ -213,8 +240,24 @@
   }
   function clean() {
     if (DEMO) return false;
+    // 视口修正：桌面 UA 下若无 viewport meta，老 WebView 会按 980px 桌面宽度缩放，
+    // 页面就被压成屏幕中间一条带（v1.3.0 修复电视上的"没铺满"）。
+    try {
+      var mv = document.querySelector('meta[name="viewport"]');
+      if (!mv) {
+        mv = document.createElement("meta");
+        mv.setAttribute("name", "viewport");
+        document.getElementsByTagName("head")[0].appendChild(mv);
+      }
+      mv.setAttribute("content", "width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no,viewport-fit=cover");
+      document.documentElement.style.setProperty("width", "100%", "important");
+      document.documentElement.style.setProperty("height", "100%", "important");
+      document.body.style.setProperty("width", "100%", "important");
+      document.body.style.setProperty("height", "100%", "important");
+    } catch (e) {}
     var v = biggestVideo();
     if (!v) return false;
+    CLEAN_COUNT++;
     var node = v, guard = 0;
     while (node && node !== document.body && node !== document.documentElement && guard++ < 30) {
       var p = node.parentElement;
@@ -236,7 +279,7 @@
     s.setProperty("height", "100vh", "important");
     s.setProperty("max-width", "none", "important");
     s.setProperty("max-height", "none", "important");
-    s.setProperty("object-fit", "contain", "important");
+    s.setProperty("object-fit", FIT, "important");
     s.setProperty("z-index", "2147483000", "important");
     s.setProperty("background", "#000", "important");
     try {
@@ -353,7 +396,7 @@
   function onPictureUp() {
     var v = biggestVideo();
     if (v && v.videoHeight) updateRes(v.videoHeight);
-    ST.stage = "playing";
+    report("playing", v ? ("画面就绪 " + v.videoWidth + "×" + v.videoHeight) : "画面就绪");
     showErr(""); mask(false);
     clearTimeout(ST.watchdog);
     showOSD();
@@ -361,13 +404,16 @@
   function startWatchdog(ch) {
     clearTimeout(ST.watchdog);
     ST.since = Date.now();
-    ST.stage = "connecting";
+    report("connecting", "正在连接官方直播…");
     var switched = false;
+    var token = MY_TOKEN;
     function tick() {
+      if (window.__LINKTV_ALIVE__ && window.__LINKTV_ALIVE__ !== token) return; // 已被新一轮注入接管
       if (videoOK()) { onPictureUp(); return; }
       var elapsed = Date.now() - ST.since;
       if (!switched && elapsed > 20000) {
-        switched = true; ST.stage = "backup";
+        switched = true;
+        report("backup", "央视频连接较慢，正在切换央视网备用线路…");
         mask(true, ch, "央视频连接较慢，正在切换备用线路…");
         showErr("已切换到央视网备用线路");
         doBackup(ch);
@@ -376,7 +422,7 @@
         return;
       }
       if (switched && elapsed > 20000) {
-        ST.stage = "failed";
+        report("failed", "网络无法访问央视频 / 央视网，按确定键重试");
         mask(true, ch, "无法连接官方直播，按确定键重试");
         showErr("网络无法访问央视频 / 央视网，请检查电视网络后按确定重试。");
         return;
@@ -387,7 +433,9 @@
   }
   function doBackup(ch) {
     if (DEMO) return;
-    try { location.href = ch && ch.b ? "https://tv.cctv.com/live/" + ch.b + "/" : BACKUP; } catch (e) {}
+    // v1.3.0：不再自行 location.href 跳转（会与原生看门狗重复切源），
+    // 统一上报给原生层，由 MainActivity.doBackupNative 执行唯一一次切换。
+    report("needBackup", ch && ch.b ? ch.b : "");
   }
 
   // ---------------- 换台 ----------------
@@ -566,22 +614,46 @@
   }
   window.__LINKTV_KEY__ = onKey;
 
-  // 本地演示：键盘直接驱动；真机由 Android 转发，此处作为兜底去重
-  document.addEventListener("keydown", function (e) {
-    if (window.__LINKTV_NATIVE_KEYS__) return;
-    var map = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
-      Enter: "ok", NumpadEnter: "ok", Escape: "back", Backspace: "back", ContextMenu: "menu",
-      " ": "ok", m: "menu", M: "menu" };
-    var name = map[e.key] || ({ 38: "up", 40: "down", 37: "left", 39: "right", 13: "ok", 27: "back", 8: "back", 93: "menu" })[e.keyCode];
-    if (!name) return;
-    e.preventDefault(); e.stopPropagation();
-    onKey(name);
-  }, true);
+  // 本地演示：键盘直接驱动；只绑一次，避免重试注入重复响应
+  if (!window.__LINKTV_KEY_HOOKED__) {
+    window.__LINKTV_KEY_HOOKED__ = true;
+    document.addEventListener("keydown", function (e) {
+      if (window.__LINKTV_NATIVE_KEYS__ && !window.__LINKTV_KB_FALLBACK__) return;
+      var map = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
+        Enter: "ok", NumpadEnter: "ok", Escape: "back", Backspace: "back", ContextMenu: "menu",
+        " ": "ok", m: "menu", M: "menu" };
+      var name = map[e.key] || ({ 38: "up", 40: "down", 37: "left", 39: "right", 13: "ok", 27: "back", 8: "back", 93: "menu" })[e.keyCode];
+      if (!name) return;
+      e.preventDefault(); e.stopPropagation();
+      if (window.__LINKTV_KEY__) window.__LINKTV_KEY__(name);
+    }, true);
+  }
+
+  // ---------------- 自检上报（推给原生覆盖层，网页全黑也能看见） ----------------
+  function report(stage, detail) {
+    ST.stage = stage;
+    try {
+      if (window.LinkTVStore && window.LinkTVStore.report)
+        window.LinkTVStore.report(stage, detail || "");
+    } catch (e) {}
+  }
+  // 全局错误捕获：任何 JS 异常都可见，不再静默黑屏（只绑一次）
+  if (!window.__LINKTV_ERRHOOK__) {
+    window.__LINKTV_ERRHOOK__ = true;
+    window.addEventListener("error", function (ev) {
+      try { if (window.LinkTVStore && window.LinkTVStore.report)
+        window.LinkTVStore.report("error", (ev.message || "JS异常") + " @" + (ev.filename || "").split("/").pop() + ":" + (ev.lineno || 0));
+      } catch (e) {}
+    });
+  }
 
   // ---------------- 启动 ----------------
   function boot() {
+    try {
+    window.__LINKTV_ALIVE__ = MY_TOKEN;
     rebuild();
     buildUI();
+    report("ui", "界面已挂载 · host=" + location.hostname);
     var pid = (location.search.match(/[?&]pid=(\d+)/) || [])[1] || "";
     var lastName = sGet("last", "") || "";
     var target = null;
@@ -599,25 +671,50 @@
 
     if (!DEMO) {
       clean();
-      setInterval(clean, 900);
+      IVS.push(setInterval(clean, 900));
       if (window.MutationObserver) {
-        try { new MutationObserver(function () { clean(); }).observe(document.documentElement, { childList: true, subtree: true }); } catch (e) {}
+        try {
+          var mo = new MutationObserver(function () { clean(); });
+          mo.observe(document.documentElement, { childList: true, subtree: true });
+          OBS.push(mo);
+        } catch (e) {}
       }
+      report("loaded", "官方网页已加载 · " + playCh().n);
     }
     updateOSD();
     mask(true, playCh(), "正在连接官方直播…");
     if (DEMO) setTimeout(onPictureUp, 450);   // 本地回归：直接出画面
     else startWatchdog(playCh());
-    setInterval(function () {
+    IVS.push(setInterval(function () {
       var d = new Date();
       UI.clock.textContent = pad(d.getHours()) + ":" + pad(d.getMinutes());
       paintProgram();
-    }, 1000);
+    }, 1000));
 
     window.__LINKTV_STATE__ = function () {
       return JSON.stringify({ stage: ST.stage, channel: playCh().n, panel: ST.panel,
         zone: ST.zone, cat: GROUPS[ST.playGi].name, ci: ST.playCi + 1 });
     };
+    // 原生轮询用：注入是否完成、有无画面、卡在哪一步
+    window.__LINKTV_DIAG__ = function () {
+      var v = biggestVideo();
+      return JSON.stringify({
+        stage: ST.stage, demo: DEMO, mode: MODE, fit: FIT,
+        clean: CLEAN_COUNT, channel: playCh().n,
+        video: v ? { w: v.videoWidth, h: v.videoHeight, paused: v.paused, rs: v.readyState } : null,
+        host: location.hostname, url: location.href,
+        mse: (function () { try { return !!(window.MediaSource && MediaSource.isTypeSupported && MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E"')); } catch (e) { return false; } })(),
+        wasm: (function () { try { return typeof WebAssembly === "object"; } catch (e) { return false; } })()
+      });
+    };
+    // 只有全部初始化完成才置 ready（带模式）；原生据此判断是否重注入
+    window.__LINKTV_BOOTED__ = READY_KEY;
+    } catch (err) {
+      // 不置 ready → 原生会重注入；错误可见
+      window.__LINKTV_BOOTED__ = "error";
+      try { if (window.LinkTVStore && window.LinkTVStore.report)
+        window.LinkTVStore.report("error", "boot: " + (err && err.message ? err.message : String(err))); } catch (e) {}
+    }
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
