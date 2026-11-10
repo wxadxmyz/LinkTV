@@ -1,139 +1,130 @@
-# LinkTV v1.1.0
+# LinkTV v1.2.0
 
-> 安卓 TV 直播应用 · 英文名 **LinkTV** · 包名 `com.linktv` · 版本 **1.1.0**
+> 安卓 TV 直播应用 · 英文名 **LinkTV** · 包名 `com.linktv` · 版本 **1.2.0**
 > 仓库：https://github.com/wxadxmyz/LinkTV
+> 打开就是 CCTV 与全国省级卫视的官方直播，不用登录、不用配源、不用导入 M3U。
 
-**打开即全屏看直播，不需要配置任何直播源。** 央视、各大卫视、全国 34 个省级行政区地方台
-共 182 个频道，直播直链由程序内置并自动从云端清单更新，用户无需填写、导入或维护任何数据，
-界面也不出现任何「源」相关字样。
+## 这一版做了什么（v1.2.0）
 
-技术上是一个 TV 风格的 HTML/JS 应用（hls.js 本地内置播放 HLS），外套安卓 WebView 外壳编译成 APK，
-可装到电视 / 盒子 / 手机。
+**播放内核整个换掉**：不再内置任何 m3u8 直链，改为用系统 WebView 全屏打开
+**央视频官方直播页** `https://www.yangshipin.cn/tv/home`，由官方网页自己负责鉴权、
+拉流与播放。App 只做三件事：把网页里除了播放画面以外的东西藏起来、把画面钉成全屏、
+再接上遥控器。
 
-## 零、下载 APK（GitHub Actions 自动构建）
+这解决的是 v1.1.0 的根本问题：直链带 CORS / 防盗链，从 `file://` 页面发请求常被挡，
+真机上就变成黑屏「正在准备频道」。现在流由官方页面自己拉，**实测能出画面**。
 
-[`.github/workflows/build.yml`](.github/workflows/build.yml) 在每次 push 到 `main` 时
-用 **JDK 17 + Android SDK 34** 云端构建 debug APK，并自动发布到 `Releases → latest`。
+同时按反馈改掉了界面与遥控器的全部问题（详见第三节）。
 
-**固定下载直链（长期有效，永远指向最新构建）：**
+## 一、频道（49 台）
 
-```
-https://github.com/wxadxmyz/LinkTV/releases/download/latest/LinkTV-debug.apk
-```
-
-| 想做什么 | 怎么做 |
-|---|---|
-| 下载 APK | 上面的直链，或仓库 **Releases → LinkTV 最新构建** → `LinkTV-debug.apk` |
-| 下载构建产物 | **Actions** → 对应运行页 → `LinkTV-debug-apk` artifact |
-| 手动触发构建 | **Actions → Build LinkTV APK → Run workflow** |
-| 本地命令行构建 | `cd android && ./gradlew assembleDebug`（需 JDK 17 + Android SDK 34） |
-
-APK 为 debug 签名，可直接 `adb install` 安装，无需额外签名。
-
-## 一、界面与操作（v1.1.0 全屏优先）
-
-**启动即全屏播放**，画面铺满，上方浮一层信息层（OSD），**3 秒后自动隐藏**只留纯画面，
-按任意键重新亮起 3 秒：
-
-| 位置 | 内容 |
-|---|---|
-| 左上角 | 第一行 **LinkTV**，第二行 **频道名**（如 CCTV-1 综合），下方分类与序号 |
-| 右上角 | **分辨率**（4K / 1080P / 720P / HD）与当前时间 |
-| 底部居中 | **LIVE 红点 + 当前节目/时段进度条 + 正在播出的内容 + 时段** |
-
-> 直播流没有可拖动的进度条，进度条表示当前节目的播出进度（节目单取不到时按时段显示）。
-
-**遥控器 / 键盘**
-
-| 按键 | 全屏时 | 选台面板里 |
+| 分类 | 数量 | 内容 |
 |---|---|---|
-| `确定 / Enter` | 呼出选台面板 | 播放选中频道并收起面板 |
-| `↑ ↓` | 换台 ±1，到分组边界自动跨到相邻分类并续播 | 在频道列表移动，同样跨分类 |
-| `← →` | 快速切到上/下一个分类并播放其首个频道 | 快速切分类 |
-| `菜单 / Menu` | 收藏 / 取消收藏当前频道 | 收藏 / 取消收藏高亮频道 |
-| `返回 / Esc` | 退出应用（安卓） | 收起面板回全屏 |
+| 央视 | 18 | CCTV-1 ~ CCTV-17、CCTV-5+ 体育赛事 |
+| 卫视 | 31 | 31 个省级行政区卫视 |
+| 收藏夹 | — | 按菜单键或点星标加入 |
 
-**选台面板**：左侧一列「央视 / 卫视 / 地方台 / 收藏夹」，紧挨右侧是该分类的频道列表；
-地方台按「地区 · 省份」分区显示。每个频道项右侧有星标（★/☆），点星标也能切换收藏。
+> **地方台暂时停用**：官方直播页没有省市地方台，本版按要求只保留 CCTV + 31 个省级卫视。
+> 频道表结构仍保留扩展位，需要时可在 `js/channels.js` 里加回。
 
-手机上没有遥控器：点画面 = 呼出/收起面板，点分类 = 切分类，点频道 = 播放，点星标 = 收藏。
-竖屏时界面自动旋转 90°，转动手机即为完整横版。
+每个台对应央视频官方 `pid`（如 CCTV-1 = `600001859`、湖南卫视 = `600002475`），
+换台即毫秒级直达，不依赖运行时学习。
 
-## 二、直播源：内置 + 云端自动维护（用户不碰源）
+## 二、技术方案
 
-- **央视 20 个**：央视官方 HLS 直链（最稳）。
-- **卫视 / 地方台**：从公开直播清单自动匹配的可播直链，离线内置在 `js/channels.js` 的 `BUILTIN_SOURCES`。
-- **自动更新**：App 启动时静默加载云端清单 [`data/sources.js`](data/sources.js)
-  （jsDelivr CDN 镜像仓库同名文件），按频道名覆盖内置直链。以后只需更新云端清单，
-  所有已安装的应用无需重装即可用上新源。取不到云端时自动用内置直链，全程无感、界面零提示。
-- **hls.js 已本地内置**（`js/hls.min.js`），APK 完全离线也能初始化播放；安卓 WebView 原生 HLS 亦可用。
-- 个别频道暂时没有可用直链时，显示品牌「正在准备频道」待播画面，不弹任何「源失效 / 加载失败」提示。
+```
+MainActivity (Java)
+  ├─ WebView 加载 https://www.yangshipin.cn/tv/home?pid=<上次频道>
+  ├─ 桌面 UA 伪装（从系统真实 UA 提取 Chrome 版本，只替换平台标识）
+  ├─ dispatchKeyEvent 前置拦截遥控器按键 → __LINKTV_KEY__(name)
+  └─ onPageStarted / onPageFinished 各注入一次 channels.js + inject.js
 
-> 覆盖率说明（如实）：央视 20/20、卫视 26/36、地方台 38/126 有内置可播直链，共 **84/182**。
-> 地方台公开可播直链本就稀少，剩余频道随云端清单持续补齐。所有直链来自公开直播清单，
-> 可能随上游变动；本应用不含任何需要用户填写的源数据。
+inject.js（注入到官方页面）
+  ├─ clean()：找最大的 <video>，沿 DOM 链隐藏所有非播放器兄弟节点，
+  │           video 钉成 fixed 全屏。按位置/尺寸判断，不写死网页 class
+  ├─ 叠加 LinkTV 的 UI：OSD / 选台面板 / 右上角收藏提示 / 换台遮罩 / 错误提示
+  ├─ 换台：优先「点击页面内频道元素」（不刷新页面，实测 livepid 正确变化）
+  │        2.4 秒无反应 → 降级 ?pid= 整页导航
+  ├─ 20 秒看门狗：无画面自动切央视网备用线路，并给出可见状态文字
+  └─ 节目单：抓官方 EPG 接口，失败静默降级为「正在直播 · 频道名」
+```
 
-## 三、品牌与图标
+**备用线路**：CCTV 各台 → `https://tv.cctv.com/live/cctvN/`；
+省级卫视 → `https://tv.cctv.com/live/`（央视网直播大厅）。
 
-**方案 A「信号电视」**：蓝紫渐变圆角屏幕 + 中央白色播放三角 + 右上角信号弧，寓意"直播信号接入大屏"。
-矢量源与成品在 `branding/`：`linktv-icon.svg`（矢量源）、`linktv-icon-1024.png` 等主图标、
-`linktv-banner-1280x720.png`（电视横幅）、`favicon.png`。
+收藏与上次频道存在 Android `SharedPreferences`（跨页面/跨域可靠），
+通过 `LinkTVStore` JavaScript 桥读写；本地浏览器打开时自动降级到 `localStorage`。
 
-已接入工程：安卓 `mipmap-*` 各密度 launcher 图标 + `drawable-xhdpi/banner.png`、网页 `favicon.png`。
-修改 SVG 后可用 cairosvg / ImageMagick 重新导出各尺寸 PNG。
+## 三、遥控器操作
 
-## 四、目录结构
+| 按键 | 全屏播放时 | 选台面板打开时 |
+|---|---|---|
+| ▲ / ▼ | 上 / 下一个台（**只在当前分类内循环**） | 右栏：在当前分类内移动高亮；左栏：切换分类 |
+| ◀ | 上一个分类 | **焦点移到左侧「频道分类」栏**（金色框） |
+| ▶ | 下一个分类 | 左栏时：回到右侧频道列表；右栏时：切下一个分类 |
+| 确定 | 打开选台面板 | 左栏：进入该分类频道列表；右栏：播放高亮频道并收起 |
+| 菜单 | 收藏 / 取消收藏当前台 | 收藏 / 取消收藏高亮频道 |
+| 返回 | 连按两次退出 | 收起面板 |
+
+**v1.1.0 → v1.2.0 修掉的问题**
+
+1. 界面只占屏幕左上角一条、文字重叠断行 → 去掉误触发的竖屏旋转，注入层用 `position:fixed; inset:0` 铺满
+2. 按左键光标没到分类栏 → 新增左右栏焦点区，左键进左栏并给金色焦点框
+3. 频道按到最下面自动跳到第 2 个分类 → 上下键改为只在当前分类内循环，切分类交给左右键
+4. 频道分类栏跟着右侧列表一起上滚 → 去掉 `scrollIntoView`，只手动滚动右侧列表容器
+5. 收藏提示弹在左上角 → 改为**屏幕右上角**的临时浮层，2 秒淡出
+6. 播不了就纯黑屏 → 全程有可见状态：连接中 / 已切备用线路 / 网络异常请重试
+
+**OSD**：左上角软件名 + 频道名 + 分类序号，右上角分辨率 + 时钟，
+底部 LIVE 红标 + 当前节目 + 时段进度条，3 秒自动隐藏，任意键重新亮起。
+
+## 四、构建与安装
+
+推送到 `main` 后由 GitHub Actions 自动构建 debug APK，并更新 `latest` Release。
+
+- **长期下载直链**：<https://github.com/wxadxmyz/LinkTV/releases/download/latest/LinkTV-debug.apk>
+- Release 页：<https://github.com/wxadxmyz/LinkTV/releases/tag/latest>
+
+也可本地构建（需 Android SDK 34 + JDK 17）：
+
+```bash
+cd android
+./gradlew assembleDebug
+# 产物：app/build/outputs/apk/debug/app-debug.apk
+```
+
+安装到电视/盒子：U 盘拷贝 APK → 电视文件管理器打开 → 允许「未知来源」→ 安装。
+`minSdk 21`（Android 5.0+），横屏，TV Leanback 桌面可见。
+
+## 五、已知限制（如实说明）
+
+- **依赖官方网页**：App 只是打开央视频的公开网页，播放由官方负责；官方改版可能让清浮层或换台失效，
+  届时更新注入脚本即可。想长期稳定，装官方 App 更省心。
+- **需要较新的 WebView**：官方播放器用 wasm + MSE，建议 Chrome 内核 70 以上；
+  过旧会弹窗提示升级 Android System WebView，不会让你对着黑屏。
+- **网络**：异地 / 运营商限制可能访问不了央视频，20 秒后自动切央视网备用线路；
+  两条都不通会明确提示检查网络。
+- **换台需要等一下**：官方播放器重载通常几秒，期间用黑遮罩盖住，不会露出网页原貌。
+- **省级卫视备用线路有限**：央视网没有各省卫视的独立直播页，只能回落到直播大厅。
+- 沙箱里已用真实浏览器验证「官方页面能播 + 清浮层全屏 + 连续换台 livepid 正确」，
+  但各品牌电视 / 盒子的 WebView 差异仍需真机实测。
+
+## 六、目录
 
 ```
 tv-live/
-├── .github/workflows/build.yml   # GitHub Actions 自动构建 APK
-├── index.html                   # 网页入口（全屏直播界面）
-├── tv-ui.html                   # 早期 UI 预览页（模拟数据，非真机界面）
-├── favicon.png
-├── css/style.css                # 全屏 TV 样式（含竖屏旋转）
+├── index.html                 # 本地界面回归页（file:// 打开即 demo 模式）
 ├── js/
-│   ├── app.js                   # 全屏逻辑 / 遥控导航 / 收藏 / 选台面板 / OSD
-│   ├── channels.js              # 频道目录 + 内置直链 + 云端清单地址
-│   └── hls.min.js               # hls.js 本地内置（离线可用）
-├── data/
-│   ├── sources.js               # 云端直播清单（程序自动加载，用户无需操作）
-│   └── sources.json             # 同上，JSON 副本（便于维护/查阅）
-├── branding/                    # 图标矢量源与多尺寸成品
-└── android/                     # 安卓 TV WebView 外壳工程
-    ├── gradlew / gradlew.bat / gradle/wrapper/   # 完整 Gradle Wrapper
-    └── app/src/main/assets/      # 已内置上述网页与数据，APK 自包含
+│   ├── channels.js            # 49 台频道表：pid / 页面匹配名 / 备用线路
+│   └── inject.js              # 注入层：清浮层 + 全屏 UI + 换台 + 看门狗 + 按键
+├── android/
+│   ├── app/src/main/java/com/linktv/MainActivity.java   # WebView 外壳
+│   ├── app/src/main/assets/   # 注入脚本与回归页（打包进 APK）
+│   └── app/build.gradle       # versionCode 3 / versionName 1.2.0
+├── tv-ui.html                 # 早期 UI 设计预览（保留）
+├── branding/                  # 方案 A「信号电视」图标与横幅
+└── .github/workflows/build.yml
 ```
 
-## 五、在电脑浏览器里先体验（无需安卓）
-
-```bash
-cd tv-live
-python3 -m http.server 8080
-# 浏览器打开 http://localhost:8080
-```
-
-> 能否播放取决于网络能否访问对应直播域名；无法访问时会显示「正在准备频道」待播画面。
-
-## 六、编译安卓 APK（在你的电脑上）
-
-1. 安装 **Android Studio**（含 Android SDK 34 与 JDK 17）。
-2. `File → Open` 选择 `tv-live/android`。
-3. 等待 Gradle 同步完成（首次需联网下载 AGP / Gradle）。
-4. `Build → Build Bundle(s) / APK(s) → Build APK(s)`。
-5. 产物在 `android/app/build/outputs/apk/debug/app-debug.apk`。
-6. 安装到设备：
-   ```bash
-   adb connect <电视IP>:5555
-   adb install app-debug.apk
-   ```
-
-命令行亦可：`cd android && ./gradlew assembleDebug`（Wrapper 已内置，无需预装 Gradle）。
-
-## 七、已知限制
-
-- **直播直链来自公开清单**，随时可能失效、限速或地区限制；云端清单会持续更新，但不保证 100% 可播。
-- **地方台覆盖率有限**：目录覆盖全部 34 个省级行政区，但有直链的约 38/126，其余待云端清单补齐。
-- **官方节目单**：尽力拉取央视 EPG 显示真实节目名与播出进度；受跨域/网络限制取不到时，
-  降级为「正在直播 · 频道名 + LIVE + 时段进度」，不影响播放。
-- **分辨率**：HLS 直链可读取真实分辨率（4K/1080P/720P），读不到时显示 HD。
-- **版权提示**：请确保你拥有所播放内容的合法观看授权，仅用于个人学习/测试。
+> 本应用只打开官方公开网页，**不内置、不分发任何直播源**，节目版权归中央广播电视总台所有。
+> 仅供个人在家观看。
