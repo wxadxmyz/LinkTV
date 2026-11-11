@@ -26,23 +26,24 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * LinkTV v1.3.0 —— 电视专用版外壳
+ * LinkTV v1.4.0 —— 电视专用版外壳
  *
- * v1.2.0 在电视失效的根因（已修复）：
- *  1) onPageStarted 就注入，此时 location.hostname 为空，注入层把自己判成 demo 模式，
- *     且 __LINKTV_BOOTED__ 开头即锁死 → clean()/看门狗全不执行，露出官网原貌+黑屏。
- *  2) screenOrientation="sensorLandscape"：电视没有重力传感器，系统按竖屏兼容模式
- *     给 Activity 分配居中窗口 → 白色竖块 + 四周大黑边。
- *  3) 桌面 UA 虚报 Chrome 120，电视真实内核远低于此，官方播放器按新能力初始化后崩溃。
- *  4) 注入失败无任何提示；20 秒切备用线路只在注入层里，注入没成功就永远不会触发。
+ * v1.3.0 在真机上暴露的问题（本版全部拆除）：
+ *  1) 注入层 20s 切源 + 原生 25s 切源 + onPageStarted 重置 everPlaying，
+ *     三层"保险"互相点火：切源触发 onPageStarted → 重置 everPlaying → 计时归零
+ *     → 到点又切源，形成整页反复重载死循环（1 分钟内多次回到"正在连接"）。
+ *  2) 确定键在 stage==='failed' 时被写成整页 reload，配合自检条"按确定键可重试"
+ *     的提示，用户越按越重载，永远调不出频道面板。
+ *  3) 全局 error 钩子把央视频网页自身的无害异常（a0b is not defined）
+ *     误报成"脚本异常"并强制钉住自检条，而画面其实正常在播。
+ *  4) 按键转发用 `window.__LINKTV_KEY__ && ...` 短路，注入未就绪时静默吞掉。
  *
- * v1.3.0 对策：
- *  - 只在 onPageFinished 注入，且明确传 __LINKTV_MODE__="tv"，不再靠 hostname 猜。
- *  - 原生自检覆盖层：即使网页全黑/注入全挂，屏幕上也有状态文字。
- *  - 原生轮询确认注入（读 __LINKTV_DIAG__），未 ready 自动重注入最多 8 次。
- *  - 原生看门狗：25 秒无画面，不依赖注入层，直接切央视网备用线路。
- *  - 真实能力探测（MSE / WASM / 真实 Chrome 版本），不再虚报 UA。
- *  - 强制 landscape + resizeableActivity=false，画面铺满。
+ * v1.4.0 对策（核心：只留一个观察哨，绝不自动导航）：
+ *  - 看门狗只观察、只提示；删除所有自动 loadUrl / 切源。
+ *  - everPlaying 一旦为 true 永不被页面重载重置（本次会话曾出过画面）。
+ *  - 唯一重载入口是用户主动按数字键 9（reloadCurrent）。
+ *  - 确定键永远开选台面板；注入未就绪时按键转发给可见反馈，不再静默吞。
+ *  - 注入层自身异常只记一行小字，不刷主状态、不强制弹自检条。
  */
 public class MainActivity extends Activity {
 
@@ -68,7 +69,7 @@ public class MainActivity extends Activity {
     private long lastBackAt = 0;
 
     // 自检状态
-    private boolean bootOk = false, everPlaying = false, didBackup = false, diagHidden = false;
+    private boolean bootOk = false, everPlaying = false, diagHidden = false;
     private int injectCount = 0;
     private long pageSince = 0, lastInjectAt = 0;
     private String stageText = "启动中", hostText = "-", bootText = "未注入",
@@ -107,8 +108,9 @@ public class MainActivity extends Activity {
         web.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView v, String url, android.graphics.Bitmap fav) {
-                // 关键：这里绝不注入。新页面刚开始时 hostname 尚未提交，注入会被误判。
-                if (url != null && url.contains("yangshipin.cn")) didBackup = false;
+                // 只更新文字，绝不在这里注入；也不重置 everPlaying。
+                // v1.3.0 在此重置 everPlaying，导致每次页面重载后 25s 看门狗
+                // 又切一次源 → 无限重载循环。
                 resetForNewPage(url);
             }
 
@@ -167,14 +169,14 @@ public class MainActivity extends Activity {
         String last = prefs.getString("last", "");
         String pid = findPid(last);
         backupSlug = findBackupSlug(last);
-        didBackup = false;
         resetForNewPage(HOME);
         web.loadUrl(HOME + (pid.isEmpty() ? "" : "?pid=" + pid));
     }
 
     private void resetForNewPage(String url) {
         bootOk = false;
-        everPlaying = false;
+        // v1.4.0：everPlaying 表示"本次 App 会话曾出过画面"，一旦为 true 不再回退。
+        // 页面因换台/手动重载而重开时保留它，任何计时器都不会被重新点燃。
         injectCount = 0;
         pageSince = System.currentTimeMillis();
         hostText = hostOf(url);
@@ -217,12 +219,12 @@ public class MainActivity extends Activity {
                     && System.currentTimeMillis() - lastInjectAt > 1800) {
                 inject();   // 注入没成功 → 重试（SPA 渲染晚、脚本被中断等）
             }
-            if (!didBackup && el > 25000 && !everPlaying) {
-                doBackupNative();
-            } else if (didBackup && el > 25000 && !everPlaying) {
-                stageText = "连接失败";
-                errText = "央视频 / 央视网均无法出画面，按确定键重试，或检查电视网络";
-                showDiag(true);
+            // v1.4.0：看门狗只观察、只提示，绝不自动 loadUrl。
+            // 自动切源会触发 onPageStarted，与 everPlaying 重置互相点火 → 重载死循环。
+            if (el > 30000 && !everPlaying && !"连接较慢".equals(stageText)) {
+                stageText = "连接较慢";
+                errText = "正在等待官方直播；如长时间无画面，按 [9] 重新加载";
+                updateDiag();
             }
             ui.postDelayed(this, 2000);
         }
@@ -264,21 +266,14 @@ public class MainActivity extends Activity {
         updateDiag();
     }
 
-    /** 原生切备用线路：央视网直播页，不依赖注入层 */
-    private void doBackupNative() {
-        if (didBackup) return;
-        didBackup = true;
-        stageText = "已切换央视网备用线路";
-        errText = "央视频 25 秒未出画面，已自动切换；若仍黑屏，多为电视网页内核过旧";
-        bootOk = false;
-        everPlaying = false;
-        injectCount = 0;
-        pageSince = System.currentTimeMillis();
-        hostText = hostOf(BACKUP + backupSlug + "/");
-        bootText = "未注入";
-        picText = "等待中";
+    /** v1.4.0：唯一的整页重载入口，只由用户主动按数字键 9 触发，绝不自动调用 */
+    private void reloadCurrent() {
+        String last = prefs.getString("last", "");
+        String pid = findPid(last);
+        stageText = "正在重新加载…";
+        errText = "";
         showDiag(true);
-        web.loadUrl(BACKUP + backupSlug + "/");
+        web.loadUrl(HOME + (pid.isEmpty() ? "" : "?pid=" + pid));
     }
 
     private void onReport(String stage, String detail) {
@@ -297,12 +292,19 @@ public class MainActivity extends Activity {
                 stageText = "播放中"; scheduleDiagFade();
                 break;
             case "backup": stageText = "正在切换备用线路…"; break;
-            case "needBackup": doBackupNative(); return;
+            case "needBackup": return;   // v1.4.0：注入层已不再上报，防御性忽略
             case "failed":
                 stageText = "连接失败"; errText = String.valueOf(detail); showDiag(true);
                 break;
             case "error":
-                stageText = "脚本异常"; errText = String.valueOf(detail); showDiag(true);
+                // v1.4.0：注入层自身异常只记一行小字，不把主状态刷成"脚本异常"、
+                // 不强制钉住自检条（正常播放时应正常淡出）。
+                errText = String.valueOf(detail);
+                break;
+            case "notready":
+                // 注入层还没 boot 完时用户按了键：给可见反馈，不再静默无反应
+                stageText = String.valueOf(detail);
+                showDiag(true);
                 break;
             default: stageText = stage; break;
         }
@@ -326,14 +328,16 @@ public class MainActivity extends Activity {
         if (diag == null) return;
         diag.setVisibility(diagHidden ? View.GONE : View.VISIBLE);
         StringBuilder sb = new StringBuilder();
-        sb.append("LinkTV v1.3.0 · 电视版自检\n");
+        sb.append("LinkTV v1.4.0 · 电视版自检\n");
         sb.append("状态：").append(stageText).append("\n");
         sb.append("网页：").append(hostText)
           .append("   注入：").append(bootText)
           .append("   画面：").append(picText).append("\n");
         sb.append("内核：").append(capText).append("\n");
         if (!errText.isEmpty()) sb.append("提示：").append(errText).append("\n");
-        sb.append(everPlaying ? "状态正常 · 按 [0] 隐藏/显示自检" : "[0] 隐藏自检 · 按确定键可重试");
+        sb.append(everPlaying
+                ? "状态正常 · 按 [0] 隐藏/显示自检 · [9] 重新加载"
+                : "[0] 隐藏自检 · [9] 重新加载当前频道");
         diag.setText(sb.toString());
         diag.bringToFront();
     }
@@ -393,6 +397,10 @@ public class MainActivity extends Activity {
             updateDiag();
             return true;
         }
+        if (e.getAction() == KeyEvent.ACTION_DOWN && k == KeyEvent.KEYCODE_9) {
+            reloadCurrent();   // 用户主动重新加载当前频道
+            return true;
+        }
         if (e.getAction() == KeyEvent.ACTION_DOWN) {
             String name = null;
             switch (k) {
@@ -411,8 +419,20 @@ public class MainActivity extends Activity {
                 default: break;
             }
             if (name != null) {
-                web.evaluateJavascript("window.__LINKTV_NATIVE_KEYS__=true;"
-                        + "(function(){try{window.__LINKTV_KEY__&&window.__LINKTV_KEY__('" + name + "')}catch(e){}})()", null);
+                // v1.4.0：让 JS 返回是否真的执行了按键。注入层未就绪时不再
+                // `&&` 短路静默吞掉，而是在自检条给出"界面加载中"的可见反馈。
+                String js = "(function(){try{"
+                        + "if(typeof window.__LINKTV_KEY__==='function'){window.__LINKTV_KEY__('" + name + "');return 'OK'}"
+                        + "return 'NOTREADY'}catch(e){return 'ERR'}})()";
+                web.evaluateJavascript("window.__LINKTV_NATIVE_KEYS__=true;" + js,
+                        new ValueCallback<String>() {
+                            @Override public void onReceiveValue(String value) {
+                                if (value != null && value.contains("NOTREADY")) {
+                                    stageText = "界面加载中，请稍候…";
+                                    showDiag(true);
+                                }
+                            }
+                        });
                 return true;
             }
         }

@@ -1,12 +1,20 @@
 /**
- * LinkTV v1.3.0 —— 官方直播页注入层（核心）
+ * LinkTV v1.4.0 —— 官方直播页注入层（核心）
  *
  * 由 MainActivity 在页面加载完成后注入到「央视频官方直播页」的 WebView 上下文中。
  *  1. clean()：只保留官方页面自己的 <video>，隐藏浮层/导航/节目单，把画面钉成全屏
  *  2. 叠加 LinkTV 的 UI（OSD / 选台面板 / 右上角收藏提示 / 换台遮罩 / 错误提示）
- *  3. 换台：优先点击页面内频道元素（不刷新、快），失败降级 ?pid= 整页导航
- *  4. 20 秒看门狗：无画面自动切央视网备用线路，全程有可见状态文字
+ *  3. 换台：优先点击页面内频道元素（不刷新、快），失败降级 ?pid= 整页导航，带节流
+ *  4. 看门狗只观察、只提示，绝不自动切源 / 整页 reload；手动重载由原生数字键 9 承担
  *  5. 按键由 Android dispatchKeyEvent 转发为 __LINKTV_KEY__(name)
+ *
+ * v1.3.0 的三个致命问题（本版全部拆除）：
+ *  - 注入层 20s 切源 + 原生 25s 切源 + onPageStarted 重置 everPlaying，
+ *    三者互相点火，形成「整页反复重载」死循环：真机 1 分钟内多次回到"正在连接"。
+ *  - 全局 error 钩子把央视频网页自身的无害异常（a0b is not defined @<uuid>:1）
+ *    误报成"脚本异常"并强制钉住自检条，而画面其实正常在播。
+ *  - 确定键在 stage==='failed' 时被写成"整页 reload"，配合自检条"按确定键可重试"
+ *    的提示，用户越按越重载，永远调不出频道面板。
  *
  * 不写死网页 class；不含任何 m3u8 直链，播放完全交给官方网页。
  * 本地 file:// 打开时进入 demo 模式（不清理、不导航），用于界面回归验证。
@@ -62,7 +70,8 @@
   var CSS = [
     "#ltv-ui{position:fixed;inset:0;z-index:2147483600;pointer-events:none;font-family:'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',system-ui,sans-serif;color:#f2f5fc;user-select:none;-webkit-user-select:none;overflow:hidden}",
     "#ltv-ui *{box-sizing:border-box}",
-    "#ltv-mask{position:absolute;inset:0;background:#05070d;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;opacity:0;visibility:hidden;transition:opacity .18s;z-index:40}",
+    "#ltv-mask{position:absolute;inset:0;background:#05070d;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;opacity:0;visibility:hidden;z-index:45}",
+    "#ltv-mbrand{font-size:clamp(15px,2vh,24px);font-weight:800;letter-spacing:5px;color:#6c8cff;margin-bottom:10px}",
     "#ltv-mask.on{opacity:1;visibility:visible}",
     "#ltv-mnum{font-size:clamp(60px,13vh,150px);font-weight:900;color:#6c8cff;letter-spacing:2px;line-height:1}",
     "#ltv-mname{font-size:clamp(26px,4.4vh,54px);font-weight:800}",
@@ -136,7 +145,7 @@
     fav: sGet("fav", []) || [],
     prog: null,
     since: Date.now(),
-    stage: "start",        // start / connecting / playing / backup / failed
+    stage: "start", playedOnce: false,   // 本页是否曾出过画面；一旦为 true 不再自动切源
     watchdog: null, switchTimer: null, osdTimer: null, toastTimer: null,
     lastSrc: "", pendingCh: null, suppressDocClick: 0
   };
@@ -203,7 +212,10 @@
       '</div>',
       '<div id="ltv-toast"></div>',
       '<div id="ltv-err"></div>',
-      '<div id="ltv-mask"><div id="ltv-mnum">01</div><div id="ltv-mname">CCTV-1 综合</div>',
+      // v1.4.0：新建遮罩默认开启。v1.3.0 每次重注入都重建 UI，新 mask 默认 hidden，
+      // boot() 若中途失败就露底 → 透出网页 poster 大圆环 / 官网原貌。
+      // 只有确实出过画面（跨重注入持久标记）才初始关闭。
+      '<div id="ltv-mask" class="' + (window.__LINKTV_PLAYED_ONCE__ ? '' : 'on') + '"><div id="ltv-mbrand">LinkTV · 官方直播</div><div id="ltv-mnum">01</div><div id="ltv-mname">CCTV-1 综合</div>',
       '  <div id="ltv-mtip">正在连接官方直播…</div>',
       '  <div id="ltv-mdots"><i></i><i></i><i></i></div></div>'
     ].join("");
@@ -271,6 +283,10 @@
       }
       node = p;
     }
+    // v1.4.0：视频未就绪时，网页自带的 poster / 加载占位图（大圆环播放按钮）
+    // 会被 object-fit:cover 放大铺满，看起来像"糊屏"。清掉 poster 并压黑底，
+    // 等待期间由 LinkTV 自己的不透明待播遮罩接管。
+    try { if (v.hasAttribute && v.hasAttribute("poster")) v.removeAttribute("poster"); } catch (e) {}
     var s = v.style;
     s.setProperty("position", "fixed", "important");
     s.setProperty("top", "0", "important");
@@ -396,47 +412,43 @@
   function onPictureUp() {
     var v = biggestVideo();
     if (v && v.videoHeight) updateRes(v.videoHeight);
+    ST.playedOnce = true;
+    window.__LINKTV_PLAYED_ONCE__ = true;   // 跨重注入持久：重建 UI 时遮罩不再初始开启
     report("playing", v ? ("画面就绪 " + v.videoWidth + "×" + v.videoHeight) : "画面就绪");
     showErr(""); mask(false);
     clearTimeout(ST.watchdog);
     showOSD();
   }
+  /**
+   * v1.4.0：看门狗降级为「纯观察」，永不自动导航 / 切源 / reload。
+   * 官方网页自己会重试拉流；我们要做的只是等，并把状态写清楚。
+   * v1.3.0 的 20s 切源 + 原生 25s 切源 + onPageStarted 重置 everPlaying
+   * 三者互相触发，是整页反复重载死循环的根源。
+   */
   function startWatchdog(ch) {
     clearTimeout(ST.watchdog);
     ST.since = Date.now();
     report("connecting", "正在连接官方直播…");
-    var switched = false;
-    var token = MY_TOKEN;
+    var token = MY_TOKEN, warned = false;
     function tick() {
-      if (window.__LINKTV_ALIVE__ && window.__LINKTV_ALIVE__ !== token) return; // 已被新一轮注入接管
+      if (window.__LINKTV_ALIVE__ && window.__LINKTV_ALIVE__ !== token) return;
       if (videoOK()) { onPictureUp(); return; }
       var elapsed = Date.now() - ST.since;
-      if (!switched && elapsed > 20000) {
-        switched = true;
-        report("backup", "央视频连接较慢，正在切换央视网备用线路…");
-        mask(true, ch, "央视频连接较慢，正在切换备用线路…");
-        showErr("已切换到央视网备用线路");
-        doBackup(ch);
-        ST.since = Date.now();
-        ST.watchdog = setTimeout(tick, 900);
-        return;
+      if (!warned && elapsed > 20000) {
+        warned = true;
+        mask(true, ch, "连接较慢，正在等待官方直播…");
+        report("connecting", "连接较慢，正在等待…（不会中断播放）");
       }
-      if (switched && elapsed > 20000) {
-        report("failed", "网络无法访问央视频 / 央视网，按确定键重试");
-        mask(true, ch, "无法连接官方直播，按确定键重试");
-        showErr("网络无法访问央视频 / 央视网，请检查电视网络后按确定重试。");
-        return;
+      if (elapsed > 60000) {
+        mask(true, ch, "长时间未出画面 · 按 [9] 可重新加载");
+        report("connecting", "长时间未出画面，可按 [9] 重新加载");
+        return;   // 停止轮询，绝不自动 reload
       }
-      ST.watchdog = setTimeout(tick, 700);
+      ST.watchdog = setTimeout(tick, 900);
     }
     ST.watchdog = setTimeout(tick, 900);
   }
-  function doBackup(ch) {
-    if (DEMO) return;
-    // v1.3.0：不再自行 location.href 跳转（会与原生看门狗重复切源），
-    // 统一上报给原生层，由 MainActivity.doBackupNative 执行唯一一次切换。
-    report("needBackup", ch && ch.b ? ch.b : "");
-  }
+  // v1.4.0：备用线路改为用户主动操作（原生数字键 9），注入层不再上报 needBackup。
 
   // ---------------- 换台 ----------------
   function clickChannelInPage(ch) {
@@ -472,6 +484,10 @@
       var v = biggestVideo(), src = v ? (v.currentSrc || "") : "";
       if (ST.stage === "playing") return;
       if (src && src !== ST.lastSrc && videoOK()) { onPictureUp(); return; }
+      // 整页导航只是「用户主动换台」的最后兜底；加 4 秒节流，避免连按时
+      // 连续 reload 造成画面反复重载。任何计时器都不会自动走到这里。
+      if (Date.now() - (ST.lastNavAt || 0) < 4000) { mask(true, ch, "正在连接官方直播…"); return; }
+      ST.lastNavAt = Date.now();
       try { location.href = HOME + "?pid=" + ch.p; } catch (e) {}
     }, clicked ? 2400 : 300);
     startWatchdog(ch);
@@ -479,13 +495,18 @@
 
   // ---------------- 面板 ----------------
   function openPanel() {
-    ST.panel = true;
-    ST.zone = "list";
-    ST.gi = ST.playGi; ST.ci = ST.playCi; ST.catFocus = ST.playGi;
-    UI.panel.classList.add("on");
-    UI.osd.classList.add("hide");
-    clearTimeout(ST.osdTimer);
-    renderPanel();
+    if (!UI.panel || !UI.cats) { notify("notready", "界面加载中，请稍候…"); return; }
+    try {
+      ST.panel = true;
+      ST.zone = "list";
+      ST.gi = ST.playGi; ST.ci = ST.playCi; ST.catFocus = ST.playGi;
+      UI.panel.classList.add("on");
+      UI.osd.classList.add("hide");
+      clearTimeout(ST.osdTimer);
+      renderPanel();
+    } catch (e) {
+      notify("notready", "选台面板暂不可用，请稍候");
+    }
   }
   function closePanel() {
     ST.panel = false;
@@ -587,10 +608,14 @@
     renderPanel();
   }
   function onKey(name) {
+    // v1.4.0：注入层可能还没 boot 完（页面刚重载的窗口期）。给可见反馈，
+    // 不让按键静默消失 —— 之前用户按确定键"完全没反应"就是这段窗口。
+    if (!UI.panel || !UI.cats) { notify("notready", "界面加载中，请稍候…"); return; }
     if (name === "menu") { toggleFav(ST.panel && ST.zone === "list" ? panelCh() : playCh()); return; }
     if (name === "back") { if (ST.panel) closePanel(); else sExit(); return; }
     if (name === "ok") {
-      if (ST.stage === "failed") { try { location.href = HOME + "?pid=" + playCh().p; } catch (e) {} return; }
+      // 确定键永远第一优先打开/操作选台面板。v1.3.0 的 failed 分支会整页 reload，
+      // 配合自检条"按确定键可重试"的提示，把用户锁进了重载循环。
       if (!ST.panel) { openPanel(); return; }
       if (ST.zone === "cats") { ST.zone = "list"; setCat(ST.catFocus); return; }
       switchTo(panelCh() || playCh());
@@ -632,17 +657,30 @@
   // ---------------- 自检上报（推给原生覆盖层，网页全黑也能看见） ----------------
   function report(stage, detail) {
     ST.stage = stage;
+    notify(stage, detail);
+  }
+  // 只给原生层报消息，不改 ST.stage（用于"界面加载中"这类非播放阶段提示）
+  function notify(stage, detail) {
     try {
       if (window.LinkTVStore && window.LinkTVStore.report)
         window.LinkTVStore.report(stage, detail || "");
     } catch (e) {}
   }
-  // 全局错误捕获：任何 JS 异常都可见，不再静默黑屏（只绑一次）
+  /**
+   * v1.4.0：只上报「属于 LinkTV 注入层」的异常。
+   * v1.3.0 把网页里任何 JS 报错都上报，央视频官网自身的混淆脚本在老内核上
+   * 会抛 "a0b is not defined @<uuid>:1"，被误显示成"脚本异常"并强制钉住自检条，
+   * 而画面其实正常在播（见真机第 1 张照片）。网页自身的异常与本软件无关。
+   */
   if (!window.__LINKTV_ERRHOOK__) {
     window.__LINKTV_ERRHOOK__ = true;
     window.addEventListener("error", function (ev) {
-      try { if (window.LinkTVStore && window.LinkTVStore.report)
-        window.LinkTVStore.report("error", (ev.message || "JS异常") + " @" + (ev.filename || "").split("/").pop() + ":" + (ev.lineno || 0));
+      try {
+        var msg = String(ev.message || ""), fn = String(ev.filename || "");
+        var ours = /boot:|LINKTV|__LINKTV_/.test(msg) || /linktv|inject\.js|channels\.js/.test(fn);
+        if (!ours) return;
+        if (window.LinkTVStore && window.LinkTVStore.report)
+          window.LinkTVStore.report("error", msg.slice(0, 120));
       } catch (e) {}
     });
   }
@@ -682,13 +720,27 @@
       report("loaded", "官方网页已加载 · " + playCh().n);
     }
     updateOSD();
-    mask(true, playCh(), "正在连接官方直播…");
-    if (DEMO) setTimeout(onPictureUp, 450);   // 本地回归：直接出画面
-    else startWatchdog(playCh());
+    // v1.4.0：重注入时若画面本来就在播（__LINKTV_PLAYED_ONCE__ 且 video 就绪），
+    // 直接判定为 playing，不要再盖一次黑遮罩闪屏。
+    if (!DEMO && window.__LINKTV_PLAYED_ONCE__ && videoOK()) {
+      onPictureUp();
+    } else {
+      mask(true, playCh(), "正在连接官方直播…");
+      if (DEMO) setTimeout(onPictureUp, 450);   // 本地回归：直接出画面
+      else startWatchdog(playCh());
+    }
     IVS.push(setInterval(function () {
       var d = new Date();
       UI.clock.textContent = pad(d.getHours()) + ":" + pad(d.getMinutes());
       paintProgram();
+      // v1.4.0：出过画面后若视频掉回未就绪（网页内部重载 / 广告 / 解码中断），
+      // 立刻用自己的不透明待播遮罩盖住，避免网页 poster 大圆环被放大糊屏；
+      // 只等待、绝不 reload，恢复后自动撤掉。
+      if (!DEMO && ST.playedOnce) {
+        var on = UI.mask.classList.contains("on");
+        if (!videoOK() && !on) mask(true, playCh(), "画面恢复中…");
+        else if (videoOK() && on) mask(false);
+      }
     }, 1000));
 
     window.__LINKTV_STATE__ = function () {
@@ -700,7 +752,7 @@
       var v = biggestVideo();
       return JSON.stringify({
         stage: ST.stage, demo: DEMO, mode: MODE, fit: FIT,
-        clean: CLEAN_COUNT, channel: playCh().n,
+        clean: CLEAN_COUNT, channel: playCh().n, played: !!ST.playedOnce,
         video: v ? { w: v.videoWidth, h: v.videoHeight, paused: v.paused, rs: v.readyState } : null,
         host: location.hostname, url: location.href,
         mse: (function () { try { return !!(window.MediaSource && MediaSource.isTypeSupported && MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E"')); } catch (e) { return false; } })(),
