@@ -3,7 +3,6 @@ name: Build LinkTV APK
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -48,6 +47,17 @@ jobs:
           echo "ANDROID_HOME=$SDKROOT" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDKROOT" >> "$GITHUB_ENV"
 
+      # v1.5.0：版本号唯一来源是 android/app/build.gradle 的 versionName。
+      # APK 文件名、Release 标签、下载链接全部由它派生，不再有隐藏的固定名。
+      - name: Read version
+        id: ver
+        run: |
+          V=$(sed -n 's/.*versionName[[:space:]]*"\([^"]*\)".*/\1/p' android/app/build.gradle | head -n 1)
+          test -n "$V" || { echo "无法读取 versionName"; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          echo ">>> 本次构建版本: v$V"
+
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
@@ -55,35 +65,73 @@ jobs:
         working-directory: android
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Collect APK
+      - name: Collect APK (versioned filename)
         run: |
           mkdir -p dist
           APK=$(find android/app/build/outputs/apk/debug -name '*.apk' -type f | head -n 1)
-          echo "构建产物: $APK"
-          cp "$APK" dist/LinkTV-debug.apk
+          test -n "$APK" || { echo "未找到 APK"; exit 1; }
+          cp "$APK" "dist/LinkTV-v${VERSION}.apk"
           ls -lh dist/
+          echo "APK_PATH=dist/LinkTV-v${VERSION}.apk" >> "$GITHUB_ENV"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LinkTV-debug-apk
-          path: dist/LinkTV-debug.apk
+          name: LinkTV-v${{ steps.ver.outputs.version }}-apk
+          path: dist/LinkTV-v${{ steps.ver.outputs.version }}.apk
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish to latest pre-release
+      # 版本化正式 Release：下载链接形如
+      # https://github.com/wxadxmyz/LinkTV/releases/download/v1.5.0/LinkTV-v1.5.0.apk
+      - name: Publish versioned release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          APK=dist/LinkTV-debug.apk
-          NOTE="自动构建于 $(date -u +'%Y-%m-%d %H:%M UTC')，commit ${GITHUB_SHA:0:7}。debug 签名，可直接安装到电视 / 盒子 / 手机。"
+          set -e
+          TAG="v${VERSION}"
+          APK="$APK_PATH"
+          NOTE="## LinkTV v${VERSION}
+
+          安卓电视直播（debug 签名，可直接安装到电视 / 盒子 / 手机）。
+
+          **下载：\`LinkTV-v${VERSION}.apk\`**（本页 Assets 中，文件名已含版本号）
+
+          - 打开即全屏：原生启动遮罩盖住网页加载期，出画面才揭开
+          - 确定键调出频道面板；上下换台；左右/左栏切分类；菜单收藏
+          - 自检条默认隐藏，按遥控器 \`0\` 显隐；按 \`9\` 手动重载
+          - 频道：CCTV 全系列 18 台 + 31 个省级卫视，共 49 台，接央视频官方直播页
+
+          构建于 $(date -u +'%Y-%m-%d %H:%M UTC')，commit ${GITHUB_SHA:0:7}。"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" --notes "$NOTE" --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "$APK" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "LinkTV v${VERSION}" \
+              --notes "$NOTE"
+          fi
+
+      # 同步 latest 固定入口：同样使用带版本号的文件名，并移除旧的无版本号文件
+      - name: Update latest pre-release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK="$APK_PATH"
+          NOTE="最新构建 v${VERSION}（$(date -u +'%Y-%m-%d %H:%M UTC')），commit ${GITHUB_SHA:0:7}。debug 签名，可直接安装到电视 / 盒子 / 手机。带版本号的正式版见 Releases 中的 v${VERSION}。"
           if gh release view latest --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release upload latest "$APK" --clobber --repo "$GITHUB_REPOSITORY"
+            # 删除历史遗留的无版本号文件，避免用户下到旧包（不存在时忽略）
+            gh release delete-asset latest "LinkTV-debug.apk" -y --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+            gh release edit latest --title "LinkTV 最新构建 · v${VERSION}" --notes "$NOTE" --repo "$GITHUB_REPOSITORY"
           else
             gh release create latest "$APK" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "LinkTV 最新构建" \
+              --title "LinkTV 最新构建 · v${VERSION}" \
               --notes "$NOTE" \
               --prerelease
           fi

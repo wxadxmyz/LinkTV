@@ -1,5 +1,5 @@
 /**
- * LinkTV v1.4.0 —— 官方直播页注入层（核心）
+ * LinkTV v1.5.0 —— 官方直播页注入层（核心）
  *
  * 由 MainActivity 在页面加载完成后注入到「央视频官方直播页」的 WebView 上下文中。
  *  1. clean()：只保留官方页面自己的 <video>，隐藏浮层/导航/节目单，把画面钉成全屏
@@ -8,13 +8,19 @@
  *  4. 看门狗只观察、只提示，绝不自动切源 / 整页 reload；手动重载由原生数字键 9 承担
  *  5. 按键由 Android dispatchKeyEvent 转发为 __LINKTV_KEY__(name)
  *
- * v1.3.0 的三个致命问题（本版全部拆除）：
- *  - 注入层 20s 切源 + 原生 25s 切源 + onPageStarted 重置 everPlaying，
- *    三者互相点火，形成「整页反复重载」死循环：真机 1 分钟内多次回到"正在连接"。
- *  - 全局 error 钩子把央视频网页自身的无害异常（a0b is not defined @<uuid>:1）
- *    误报成"脚本异常"并强制钉住自检条，而画面其实正常在播。
- *  - 确定键在 stage==='failed' 时被写成"整页 reload"，配合自检条"按确定键可重试"
- *    的提示，用户越按越重载，永远调不出频道面板。
+ * v1.5.0 —— 电视真机（Chrome 83）录像暴露的两个问题：
+ *  A) 打开后要先露 ~20 秒官网原貌（顶部白导航 / 右侧 CCTV 侧栏 / 底部白条）
+ *     和一个占满屏的巨大白色播放按钮，才出画面。根因：官方网页的播放器在电视
+ *     上不会自己起播（等一次"用户手势"），且老内核上网页会自己重载一次；
+ *     v1.4.0 又定死了「绝不自动导航/自动 reload」，于是只能一直干等。
+ *     对策：① 原生层新增不透明「启动遮罩」，网页在底下怎么折腾都看不见，
+ *     只有真正检测到出画面才揭开（见 MainActivity）；② 注入层 kickPlay() 主动
+ *     video.play() + 合成点一次播放按钮，把起播提前，但绝不导航、绝不 reload。
+ *  B) 按确定键调不出频道面板。根因：用户按键时正好卡在网页重载窗口，注入层还没
+ *     boot 完，__LINKTV_KEY__ 未挂载 → 按键被丢；同时官网侧栏抢走遥控器焦点。
+ *     对策：① 原生层按键排队补发（pendingOk），注入层一就绪立刻补一次 ok；
+ *     ② 注入层 onKey/UI 自愈：#ltv-ui 被网页冲掉时自动重建，绝不再返回 notready
+ *     就撒手；③ sweepOverlays() 持续压掉官网全屏浮层，避免焦点被抢。
  *
  * 不写死网页 class；不含任何 m3u8 直链，播放完全交给官方网页。
  * 本地 file:// 打开时进入 demo 模式（不清理、不导航），用于界面回归验证。
@@ -28,10 +34,30 @@
   var MODE = window.__LINKTV_MODE__ === "tv" ? "tv" : "demo";
   var DEMO = (MODE !== "tv");
   var READY_KEY = "ready:" + MODE;
+
+  /**
+   * v1.5.0：按键入口与队列放在【全局 window 上、且早于幂等锁】。
+   * 电视上官方网页会自己重载一次，原生也会重复注入；曾出现"入口挂在 A 闭包、
+   * boot 跑在 B 闭包"的竞态，排队按键被丢 —— 真机"按确定键调不出频道列表"。
+   * 全局队列保证：无论哪个闭包 boot 成功，都能消费全部排队按键，一个不丢。
+   */
+  if (!window.__LINKTV_Q__) window.__LINKTV_Q__ = [];
+  if (typeof window.__LINKTV_KEY__ !== "function") {
+    window.__LINKTV_KEY__ = function (name) {
+      if (typeof window.__LINKTV_LIVE__ === "function") {
+        try { window.__LINKTV_LIVE__(name); } catch (e) {}
+      } else if (window.__LINKTV_Q__.length < 8) {
+        window.__LINKTV_Q__.push(name);
+      }
+    };
+  }
+  window.__LINKTV_PRESENT__ = true;
+
   // 只有 boot() 完整成功才置 ready；且标记带模式 —— 若上一轮误判成 demo、
   // 这一轮以 tv 重注入时必须能重新 boot，绝不能被幂等锁挡死。
   if (window.__LINKTV_BOOTED__ === READY_KEY) return;
-  // 同一文档内重注入（boot 抛错时）：先清掉上一轮的定时器/观察器，避免累积
+  // 同一文档内重注入（boot 抛错时）：先清掉上一轮的定时器/观察器，避免累积。
+  // 全局按键队列与入口不受影响，重注入不会丢用户已按下的键。
   if (window.__LINKTV_CLEANUP__) { try { window.__LINKTV_CLEANUP__(); } catch (e) {} }
   var IVS = [], OBS = [];
   var MY_TOKEN = String(Date.now()) + "_" + Math.floor(Math.random() * 1e6);
@@ -39,7 +65,10 @@
     IVS.forEach(function (id) { try { clearInterval(id); } catch (e) {} });
     OBS.forEach(function (o) { try { o.disconnect(); } catch (e) {} });
     IVS = []; OBS = [];
+    // 旧闭包的 onKey 引用旧 UI（已随重注入移除），失效；改回排队态等新 boot
+    try { window.__LINKTV_LIVE__ = null; } catch (e) {}
   };
+  var BOOTED = false;
 
   var CFG = window.LINKTV_CHANNELS || { GROUPS: [], flatten: function () { return []; } };
   var HOME = CFG.HOME || "https://www.yangshipin.cn/tv/home";
@@ -287,6 +316,7 @@
     // 会被 object-fit:cover 放大铺满，看起来像"糊屏"。清掉 poster 并压黑底，
     // 等待期间由 LinkTV 自己的不透明待播遮罩接管。
     try { if (v.hasAttribute && v.hasAttribute("poster")) v.removeAttribute("poster"); } catch (e) {}
+    try { v.poster = ""; } catch (e) {}
     var s = v.style;
     s.setProperty("position", "fixed", "important");
     s.setProperty("top", "0", "important");
@@ -306,6 +336,84 @@
       document.body.style.setProperty("background", "#000", "important");
     } catch (e) {}
     return true;
+  }
+
+  /**
+   * v1.5.0：持续压制官网浮层。
+   * 电视上官方网页会自己重载一次，重载后重新长出的顶部导航 / 右侧 CCTV 侧栏 /
+   * 底部白条 / 全屏"巨大播放按钮"层会盖在画面上，还会抢走遥控器焦点。
+   * clean() 只处理 video 的祖先链；这里补掉「与 video 无关的大块固定定位浮层」。
+   * 只在尚未出画面时执行，且限流，避免在 Chrome 83 上拖慢网页。
+   */
+  var sweepAt = 0;
+  function sweepOverlays() {
+    if (DEMO) return;
+    var now = Date.now();
+    if (now - sweepAt < 1200) return;
+    sweepAt = now;
+    var v = biggestVideo();
+    // 收集 video 的祖先链：这些容器必须保留，否则播放器 DOM 会被一起藏掉
+    var keep = {}, n = v, guard = 0;
+    while (n && guard++ < 30) { keep[n] = 1; n = n.parentElement; }
+    var vw = window.innerWidth || 1920, vh = window.innerHeight || 1080;
+    var cand;
+    try { cand = document.body.querySelectorAll("div,section,aside,header,footer,nav,ul,img"); }
+    catch (e) { return; }
+    for (var i = 0; i < cand.length && i < 500; i++) {
+      var e = cand[i];
+      if (keep[e]) continue;
+      if (e.hasAttribute && e.hasAttribute("data-ltv-ui")) continue;
+      if (e.closest && e.closest("#ltv-ui")) continue;
+      if (e.tagName === "SCRIPT" || e.tagName === "STYLE") continue;
+      var r, cs;
+      try { r = e.getBoundingClientRect(); } catch (e2) { continue; }
+      if (r.width < vw * 0.42 || r.height < vh * 0.30) continue;
+      try { cs = window.getComputedStyle(e); } catch (e3) { continue; }
+      if (!cs || (cs.position !== "fixed" && cs.position !== "absolute")) continue;
+      // 只隐藏浮层，不动 video 所在链
+      try { e.style.setProperty("display", "none", "important"); } catch (e4) {}
+    }
+  }
+
+  /**
+   * v1.5.0：主动触发一次起播。
+   * 官方播放器在电视 WebView 上不会自己起播（等一次"用户手势"），v1.4.0 又
+   * 定死了绝不自动导航/重载，结果只能干等 20 多秒。这里只做两件安全的事：
+   *  ① 对已存在的 <video> 调 play()；② 合成点一下网页自带的"大播放按钮"。
+   * 绝不 loadUrl / 改 location / 切源。限次、限频，出画面即停。
+   */
+  var kickAt = 0, kickN = 0;
+  function kickPlay() {
+    if (DEMO || ST.playedOnce || kickN >= 8) return;
+    var now = Date.now();
+    if (now - kickAt < 1500) return;
+    kickAt = now; kickN++;
+    var v = biggestVideo();
+    if (v) {
+      try {
+        if (v.paused && v.play) {
+          var pr = v.play();
+          if (pr && pr.catch) pr.catch(function () {});
+        }
+      } catch (e) {}
+    }
+    // 合成点击网页自己的播放按钮；suppressDocClick 防止被误当成"点击呼出面板"
+    // 不用裸 button 选择器，避免误点"节目单 / 清晰度"等网页功能键
+    ST.suppressDocClick = Date.now() + 900;
+    var sels = ["[class*='play']", "[id*='play']", "[class*='poster']", "[class*='cover']"];
+    for (var s = 0; s < sels.length; s++) {
+      var list;
+      try { list = document.querySelectorAll(sels[s]); } catch (e2) { continue; }
+      for (var j = 0; j < list.length && j < 8; j++) {
+        var el2 = list[j];
+        if (el2.closest && el2.closest("#ltv-ui")) continue;
+        var r; try { r = el2.getBoundingClientRect(); } catch (e3) { continue; }
+        if (r.width < 40 || r.height < 40) continue;
+        try { el2.click(); } catch (e4) {}
+        break;
+      }
+    }
+    if (v) { try { v.click(); } catch (e5) {} }
   }
 
   // ---------------- 遮罩 / 提示 / OSD ----------------
@@ -433,6 +541,9 @@
     function tick() {
       if (window.__LINKTV_ALIVE__ && window.__LINKTV_ALIVE__ !== token) return;
       if (videoOK()) { onPictureUp(); return; }
+      // v1.5.0：网页不自动起播就主动点一下（限次限频，绝不导航）。这是把
+      // 电视上 20 多秒等待压到几秒的关键，同时不破坏"绝不自动 reload"原则。
+      kickPlay();
       var elapsed = Date.now() - ST.since;
       if (!warned && elapsed > 20000) {
         warned = true;
@@ -494,6 +605,26 @@
   }
 
   // ---------------- 面板 ----------------
+  /**
+   * v1.5.0：UI 自愈。官方网页重载 / 重建 DOM 时会把 #ltv-ui 一起冲掉，
+   * 此时 UI.* 指向的是游离节点，openPanel() 改了 class 也看不见 —— 表现就是
+   * "按确定键没反应"。这里检查 UI 是否还在文档里，不在就原样重建并恢复遮罩状态。
+   */
+  function ensureUI() {
+    var root = document.getElementById("ltv-ui");
+    if (root && UI.panel && UI.cats && UI.mask) return true;
+    try {
+      buildUI();
+      // 关键：新 UI 的面板默认是关闭的，必须把 ST.panel 同步回 false。
+      // 否则 ST.panel 仍为 true 时按确定键会走成 switchTo()（换台/整页导航），
+      // 而不是 openPanel() —— 真机上表现为"按确定键没反应或直接跳走"。
+      ST.panel = false;
+      // 重建后恢复遮罩：曾出过画面且当前有画面 → 不盖；否则保持品牌待播遮罩
+      if (window.__LINKTV_PLAYED_ONCE__ && videoOK()) mask(false);
+      else mask(true, playCh(), "正在连接官方直播…");
+      return !!(UI.panel && UI.cats);
+    } catch (e) { return false; }
+  }
   function openPanel() {
     if (!UI.panel || !UI.cats) { notify("notready", "界面加载中，请稍候…"); return; }
     try {
@@ -608,9 +739,9 @@
     renderPanel();
   }
   function onKey(name) {
-    // v1.4.0：注入层可能还没 boot 完（页面刚重载的窗口期）。给可见反馈，
-    // 不让按键静默消失 —— 之前用户按确定键"完全没反应"就是这段窗口。
-    if (!UI.panel || !UI.cats) { notify("notready", "界面加载中，请稍候…"); return; }
+    // v1.5.0：先自愈 UI（网页重载可能把 #ltv-ui 冲掉），再处理按键。
+    // 入口已带排队，boot 之前收到的确定键会在 boot 后在这里被消费并开面板。
+    if (!ensureUI()) { notify("notready", "界面加载中，请稍候…"); return; }
     if (name === "menu") { toggleFav(ST.panel && ST.zone === "list" ? panelCh() : playCh()); return; }
     if (name === "back") { if (ST.panel) closePanel(); else sExit(); return; }
     if (name === "ok") {
@@ -637,7 +768,8 @@
     if (name === "up") { ST.panel ? movePanel(-1) : playStep(-1); return; }
     if (name === "down") { ST.panel ? movePanel(1) : playStep(1); return; }
   }
-  window.__LINKTV_KEY__ = onKey;
+  // v1.5.0：不再在这里覆盖 __LINKTV_KEY__。入口已在脚本开头挂好（带排队），
+  // boot() 完成后置 BOOTED=true 并消费队列即可，保证重载窗口里按键不丢。
 
   // 本地演示：键盘直接驱动；只绑一次，避免重试注入重复响应
   if (!window.__LINKTV_KEY_HOOKED__) {
@@ -730,9 +862,14 @@
       else startWatchdog(playCh());
     }
     IVS.push(setInterval(function () {
+      // 网页重载可能把 UI 冲掉，周期性自愈，保证任何时候按确定键都有面板可开
+      if (!document.getElementById("ltv-ui")) { try { ensureUI(); } catch (e) {} }
+      if (!UI.clock) return;
       var d = new Date();
       UI.clock.textContent = pad(d.getHours()) + ":" + pad(d.getMinutes());
       paintProgram();
+      // v1.5.0：持续压制官网重载后重新长出的浮层（侧栏 / 导航 / 白条 / 大播放按钮）
+      sweepOverlays();
       // v1.4.0：出过画面后若视频掉回未就绪（网页内部重载 / 广告 / 解码中断），
       // 立刻用自己的不透明待播遮罩盖住，避免网页 poster 大圆环被放大糊屏；
       // 只等待、绝不 reload，恢复后自动撤掉。
@@ -752,7 +889,7 @@
       var v = biggestVideo();
       return JSON.stringify({
         stage: ST.stage, demo: DEMO, mode: MODE, fit: FIT,
-        clean: CLEAN_COUNT, channel: playCh().n, played: !!ST.playedOnce,
+        booted: BOOTED, clean: CLEAN_COUNT, channel: playCh().n, played: !!ST.playedOnce,
         video: v ? { w: v.videoWidth, h: v.videoHeight, paused: v.paused, rs: v.readyState } : null,
         host: location.hostname, url: location.href,
         mse: (function () { try { return !!(window.MediaSource && MediaSource.isTypeSupported && MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E"')); } catch (e) { return false; } })(),
@@ -761,6 +898,11 @@
     };
     // 只有全部初始化完成才置 ready（带模式）；原生据此判断是否重注入
     window.__LINKTV_BOOTED__ = READY_KEY;
+    // v1.5.0：boot 完成，登记当前闭包的 onKey 并消费全局排队的按键
+    BOOTED = true;
+    window.__LINKTV_LIVE__ = onKey;
+    var q = (window.__LINKTV_Q__ || []).splice(0);
+    q.forEach(function (k) { try { onKey(k); } catch (e) {} });
     } catch (err) {
       // 不置 ready → 原生会重注入；错误可见
       window.__LINKTV_BOOTED__ = "error";
