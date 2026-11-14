@@ -75,7 +75,7 @@ public class MainActivity extends Activity {
     private WebView web;
     private FrameLayout root;
     private TextView diag;
-    private View bootCover;              // v1.5.0：原生启动遮罩（盖住网页启动期全部中间态）
+    private FrameLayout bootCover;       // v1.5.0：原生启动遮罩（盖住网页启动期全部中间态）
     private TextView coverTip;
     private SharedPreferences prefs;
     private final Handler ui = new Handler(Looper.getMainLooper());
