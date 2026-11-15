@@ -17,8 +17,10 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:banner="@drawable/banner"
         android:label="@string/app_name"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.LinkTV">
 
+        <!-- v2.0.0：强制横屏 + 内容延伸到刘海/挖孔区，消除手机横屏单侧黑边 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"

@@ -3,632 +3,1006 @@ package com.linktv;
 import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
+import android.graphics.Gravity;
 import android.graphics.Typeface;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.view.Gravity;
+import android.util.Log;
+import android.util.TypedValue;
 import android.view.KeyEvent;
+import android.view.TextureView;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
-import android.webkit.JavascriptInterface;
-import android.webkit.ValueCallback;
-import android.webkit.WebChromeClient;
-import android.webkit.WebSettings;
-import android.webkit.WebView;
-import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
-import android.widget.Toast;
+
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.MimeTypes;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.Player;
+import androidx.media3.common.VideoSize;
+import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * LinkTV v1.5.0 —— 电视专用版外壳
+ * LinkTV v2.0.0 —— 原生播放器电视直播（架构重写）
  *
- * v1.4.0 在电视（Chrome 83）真机录像里暴露的问题：
- *  A) 打开后 ~20 秒里先露官网原貌（顶部白导航 / 右侧 CCTV 侧栏 / 底部白条）、
- *     再露一个占满屏的巨大白色播放按钮，之后才出画面。用户感知＝"不能打开就播"。
- *     根因：官方播放器在电视 WebView 上不自动起播，老内核还会自己重载一次；
- *     v1.4.0 又定死「绝不自动导航/reload」，只能干等。
- *  B) 那段窗口里按确定键调不出频道列表：网页重载时 __LINKTV_KEY__ 尚未挂载，
- *     按键被原生返回 NOTREADY 后丢掉；官网侧栏还抢走遥控器焦点。
- *  C) 自检条常驻在画面左下角，碍眼。
+ * 与 v1.x 的根本区别：不再用 WebView 打开央视频官网网页再注入 JS 削成视频。
+ * v1.x 的一切顽疾（打开要等 20 秒官网加载/重载、确定键在 NOTREADY 窗口丢失、
+ * 官网浮层抢焦点露原貌、遮罩揭开时机错乱）都源于「依赖别人的网页」。
  *
- * v1.5.0 对策（核心：把"启动期"从网页手里收回到原生层）：
- *  - 新增【原生启动遮罩】：不透明品牌页盖住 WebView，网页在底下加载/重载/露浮层
- *    都看不见；只有 PROBE 检测到真正出画面（video 非暂停且有尺寸）才淡出揭开。
- *    因此观感上"打开即全屏、直接进播放"，中间态一律不露出。
- *  - 自检条默认隐藏（按 0 才显隐），不再开机常驻。
- *  - 确定键双保险：注入层把 __LINKTV_KEY__ 提前到脚本开头并排队，原生层在
- *    NOTREADY 时也把 ok 排队（pendingOk），注入层一就绪立即补发，绝不丢键。
- *  - 注入层 kickPlay() 主动 video.play() + 合成点击播放按钮，把起播提前；
- *    sweepOverlays() 持续压掉官网重载后重新长出的浮层。
- *  - 仍然坚决不做任何自动 loadUrl / 自动切源 / 自动 reload；唯一重载入口是数字键 9。
+ * v2.0.0：
+ *  - 原生 Media3 ExoPlayer 直接播放 m3u8 / mp4 直播流，启动 1~3 秒出画面
+ *  - 频道表内置 assets/tv.m3u（620 条线路 / 12 分类 / 404 频道，离线可用）；
+ *    后台还会尝试从 gitee 拉取最新 m3u 存本地缓存，下次启动优先用缓存，源失效可自愈
+ *  - 分类栏 + 频道列表 + 收藏提示全部原生绘制，按键由 dispatchKeyEvent 前置拦截，
+ *    完全不依赖网页焦点系统 —— 确定键任何时候都能开面板
+ *  - 播放失败自动切下一条线路：只换 MediaItem，绝不重建页面/Activity；
+ *    索引单调递增 + 硬次数上限，天然不可能形成 v1.3.0 那种重载死循环
+ *  - 画面用 TextureView（普通 View 层级，规避 SurfaceView 在部分电视盒子上打洞黑屏），
+ *    自己按视频宽高比算 FIT（contain）：完整显示不裁切，
+ *    超宽手机两侧留等量黑边；配合刘海 shortEdges 消除单侧黑边
+ *  - 明文 http 线路（源里 389/620 条）由 usesCleartextTraffic 放行
  */
 public class MainActivity extends Activity {
 
-    private static final String HOME = "https://www.yangshipin.cn/tv/home";
-    private static final String BACKUP = "https://tv.cctv.com/live/";
+    private static final String TAG = "LinkTV";
+    private static final String HOME_ASSET = "tv.m3u";   // 内置全量频道表（m3u 原文）
+    private static final String CACHE_FILE = "tv.m3u";  // 在线更新缓存，优先于内置
+    private static final String UPDATE_URL =
+            "https://gitee.com/xmyzjxn/muhai-live/raw/master/tv.m3u";
+    private static final int MAX_ATTEMPTS = 20;      // 单频道换线路硬上限，绝不无限重试
+    private static final int CAT_ROWS = 8;           // 分类栏虚拟窗口行数
+    private static final int CHAN_ROWS = 9;          // 频道栏虚拟窗口行数
+    private static final String FAV_NAME = "我的收藏";
+    private static final String SEP = "\u0001";
+    private static final Pattern GROUP_PATTERN =
+            Pattern.compile("group-title=\"([^\"]*)\"");
+    private static final String[] GROUP_ORDER = {
+            "央视频道", "卫视频道", "省级频道", "新闻频道", "影视频道", "少儿频道",
+            "海外频道", "DJ舞曲", "历届春晚", "北京地区", "山西地区", "未分组",
+    };
 
-    /** 单次读取注入层诊断，返回短字符串，避免 JSON 转义问题。
-     *  第 7 段 booted：1=注入层已 boot（按键可用），0=脚本在但还没 boot。
-     *  第 8 段 ui：#ltv-ui 是否还在文档里（网页重载会把它冲掉）。 */
-    private static final String PROBE =
-            "(function(){try{" +
-            "var d=window.__LINKTV_DIAG__?JSON.parse(window.__LINKTV_DIAG__()):null;" +
-            "if(!d)return (window.__LINKTV_PRESENT__?'PRESENT':'NO')+'|0|-|-|-|-|-|0|0';" +
-            "var v=d.video;return (v&&v.w>0&&!v.paused?'PIC':'NOPIC')+'|'+d.clean+'|'+d.stage+" +
-            "'|'+(d.mse?'1':'0')+'|'+(d.wasm?'1':'0')+'|'+d.mode+'|'+(d.booted?'1':'0')+" +
-            "'|'+(document.getElementById('ltv-ui')?'1':'0');" +
-            "}catch(e){return 'ERR|0|-|-|-|-|-|0|0'}})()";
+    /** 频道：一个名字 + 若干条线路（按可用性排序） */
+    static final class Chan {
+        final String name;
+        final ArrayList<String> urls = new ArrayList<>();
+        Chan(String n) { name = n; }
+    }
+    /** 分类 */
+    static final class Grp {
+        final String name;
+        final ArrayList<Chan> chans = new ArrayList<>();
+        Grp(String n) { name = n; }
+    }
 
-    /** 补发排队的确定键：注入层 boot 完成后即可开面板 */
-    private static final String FLUSH_OK =
-            "(function(){try{if(typeof window.__LINKTV_KEY__==='function'){" +
-            "window.__LINKTV_KEY__('ok');return 'OK'}return 'NO'}catch(e){return 'ERR'}})()";
+    private final ArrayList<Grp> groups = new ArrayList<>();
+    private Grp favGroup;
+    private Set<String> favKeys = new HashSet<>();
 
-    private WebView web;
-    private FrameLayout root;
-    private TextView diag;
-    private FrameLayout bootCover;       // v1.5.0：原生启动遮罩（盖住网页启动期全部中间态）
-    private TextView coverTip;
+    private ExoPlayer player;
+    private TextureView surface;
+    private FrameLayout root, cover, panel;
+    private LinearLayout catCol, chanCol;
+    private TextView coverTitle, coverTip, infoBar, osd, toast, errBar, catTitle, chanTitle;
+    private final TextView[] catRows = new TextView[CAT_ROWS];
+    private final TextView[] chanRows = new TextView[CHAN_ROWS];
+
     private SharedPreferences prefs;
     private final Handler ui = new Handler(Looper.getMainLooper());
+    private String verName = "2.0.0", sourceInfo = "";
+    private int videoW = 0, videoH = 0;
 
-    private String channelsJs = "", injectJs = "", rawUa = "", chromeVer = "未知";
-    private String verName = "1.5.0";   // 从包信息动态读取，保证与 build.gradle 一致
+    // 当前播放位置
+    private int curGrp = 1, curChan = 0;
+    private int curLine = 0, curVariant = 0, attempts = 0;
+    private boolean coverShown = true, infoHidden = true;
+    private long lastSwitchAt = 0;
+
+    // 面板/焦点状态
+    private boolean panelOpen = false;
+    private int zone = 1;              // 0=分类栏 1=频道栏
+    private int panelGrp = 1, panelChan = 0;
     private long lastBackAt = 0;
 
-    // 自检状态
-    private boolean bootOk = false, everPlaying = false, diagHidden = true;  // v1.5.0：自检默认隐藏
-    private boolean pendingOk = false;   // v1.5.0：确定键排队，注入层就绪后补发
-    private boolean scriptPresent = false; // 注入脚本是否已挂载（避免打断 boot 的重复注入）
-    private boolean coverShown = true;   // 启动遮罩是否仍显示
-    private int picStreak = 0;           // 连续探测到出画面的次数
-    private int injectCount = 0;
-    private long pageSince = 0, lastInjectAt = 0;
-    private String stageText = "启动中", hostText = "-", bootText = "未注入",
-            picText = "等待中", capText = "检测中…", errText = "";
-    private String backupSlug = "cctv1";
+    private final Runnable hideToast = new Runnable() {
+        @Override public void run() { if (toast != null) toast.setAlpha(0f); }
+    };
+    private final Runnable hideOsd = new Runnable() {
+        @Override public void run() { if (osd != null) osd.setAlpha(0f); }
+    };
+
+    // ============================ 生命周期 ============================
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        hideSystemUi();
+        fullscreen();
+        try {
+            PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+            if (pi.versionName != null && !pi.versionName.isEmpty()) verName = pi.versionName;
+        } catch (Exception ignore) {}
 
         prefs = getSharedPreferences("linktv", Context.MODE_PRIVATE);
-        try {
-            String v = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
-            if (v != null && !v.isEmpty()) verName = v;
-        } catch (Exception ignore) {}
-        channelsJs = readAsset("js/channels.js");
-        injectJs = readAsset("js/inject.js");
+        favKeys = new HashSet<>(prefs.getStringSet("favs", new HashSet<String>()));
 
-        web = new WebView(this);
-        WebSettings ws = web.getSettings();
-        ws.setJavaScriptEnabled(true);
-        ws.setDomStorageEnabled(true);
-        ws.setDatabaseEnabled(true);
-        ws.setMediaPlaybackRequiresUserGesture(false);
-        ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        ws.setCacheMode(WebSettings.LOAD_DEFAULT);
-        ws.setBuiltInZoomControls(false);
-        ws.setDisplayZoomControls(false);
-        // 电视上让网页按设备宽度布局，避免 PC 页被缩成中间一条带
-        ws.setUseWideViewPort(true);
-        ws.setLoadWithOverviewMode(true);
-        rawUa = ws.getUserAgentString();
-        Matcher cm = Pattern.compile("Chrome/([0-9.]+)").matcher(rawUa == null ? "" : rawUa);
-        if (cm.find()) chromeVer = cm.group(1);
-        ws.setUserAgentString(buildDesktopUa(rawUa));
-        web.setBackgroundColor(0xFF000000);
-
-        web.setWebViewClient(new WebViewClient() {
-            @Override
-            public void onPageStarted(WebView v, String url, android.graphics.Bitmap fav) {
-                // 只更新文字，绝不在这里注入；也不重置 everPlaying。
-                // v1.3.0 在此重置 everPlaying，导致每次页面重载后 25s 看门狗
-                // 又切一次源 → 无限重载循环。
-                resetForNewPage(url);
-            }
-
-            @Override
-            public void onPageFinished(WebView v, String url) {
-                hostText = hostOf(url);
-                inject();
-            }
-
-            @Override
-            public void onReceivedError(WebView v, int code, String desc, String failingUrl) {
-                stageText = "网络异常";
-                errText = (desc == null ? String.valueOf(code) : desc) + " · 请检查电视网络";
-                setCoverTip("网络连接失败 · 按 [9] 重试");
-                updateDiag();   // v1.5.0：不自动弹自检条
-            }
-        });
-        web.setWebChromeClient(new WebChromeClient());
-        web.addJavascriptInterface(new Bridge(), "LinkTVStore");
-
-        root = new FrameLayout(this);
-        root.setBackgroundColor(0xFF000000);
-        root.addView(web, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-
-        diag = new TextView(this);
-        diag.setTextColor(0xFFEAF0FF);
-        diag.setTextSize(15f);
-        diag.setTypeface(Typeface.MONOSPACE);
-        diag.setBackgroundColor(0xDD05070D);
-        diag.setPadding(26, 16, 26, 16);
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT);
-        lp.gravity = Gravity.BOTTOM | Gravity.LEFT;
-        lp.leftMargin = 26;
-        lp.bottomMargin = 26;
-        root.addView(diag, lp);
-        diag.setVisibility(View.GONE);   // v1.5.0：默认隐藏，按 0 才显隐
-
-        buildBootCover();
-        root.addView(bootCover, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-
-        setContentView(root);
-        loadHome();
-        ui.postDelayed(ticker, 1500);
-    }
-
-    /**
-     * v1.5.0 启动遮罩：不透明品牌页，盖在 WebView 之上。
-     * 官方网页在底下加载 / 重载 / 长浮层 / 显示白色大播放按钮，用户一律看不见。
-     * 只有真正检测到出画面才淡出揭开，实现"打开即全屏、直接进播放"。
-     */
-    private void buildBootCover() {
-        bootCover = new FrameLayout(this);
-        bootCover.setBackgroundColor(0xFF05070D);
-        bootCover.setClickable(true);   // 吃掉启动期的点击，避免点到网页浮层
-
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setGravity(Gravity.CENTER_HORIZONTAL);
-        FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT);
-        bp.gravity = Gravity.CENTER;
-
-        TextView brand = new TextView(this);
-        brand.setText("LinkTV");
-        brand.setTextColor(0xFF6C8CFF);
-        brand.setTextSize(52f);
-        brand.setTypeface(Typeface.DEFAULT_BOLD);
-        brand.setLetterSpacing(0.12f);
-        brand.setGravity(Gravity.CENTER);
-        box.addView(brand);
-
-        TextView sub = new TextView(this);
-        sub.setText("官方直播 · 正在连接 CCTV");
-        sub.setTextColor(0xFF98A4BD);
-        sub.setTextSize(20f);
-        sub.setGravity(Gravity.CENTER);
-        sub.setPadding(0, 18, 0, 0);
-        box.addView(sub);
-
-        coverTip = new TextView(this);
-        coverTip.setText("正在准备播放…");
-        coverTip.setTextColor(0xFFEAF0FF);
-        coverTip.setTextSize(24f);
-        coverTip.setGravity(Gravity.CENTER);
-        coverTip.setPadding(0, 46, 0, 0);
-        box.addView(coverTip);
-
-        TextView hint = new TextView(this);
-        hint.setText("首次启动需等待官方直播加载，请稍候");
-        hint.setTextColor(0xFF5A6785);
-        hint.setTextSize(16f);
-        hint.setGravity(Gravity.CENTER);
-        hint.setPadding(0, 20, 0, 0);
-        box.addView(hint);
-
-        TextView ver = new TextView(this);
-        ver.setText("v" + verName);
-        ver.setTextColor(0xFF414C66);
-        ver.setTextSize(14f);
-        ver.setGravity(Gravity.CENTER);
-        ver.setPadding(0, 34, 0, 0);
-        box.addView(ver);
-
-        bootCover.addView(box, bp);
-    }
-
-    /** 出画面后揭开启动遮罩：淡出 400ms 后移除，只执行一次 */
-    private void revealCover() {
-        if (!coverShown) return;
-        coverShown = false;
-        bootCover.animate().alpha(0f).setDuration(420).withEndAction(new Runnable() {
-            @Override public void run() { bootCover.setVisibility(View.GONE); }
-        }).start();
-    }
-
-    private void setCoverTip(String s) {
-        if (coverShown && coverTip != null) coverTip.setText(s);
-    }
-
-    /** 桌面 UA 只替换平台标识，Chrome 版本用系统真实值；取不到用保守下限，绝不虚报高版本 */
-    private String buildDesktopUa(String raw) {
-        String chrome = null;
-        if (raw != null) {
-            Matcher m = Pattern.compile("Chrome/([0-9.]+)").matcher(raw);
-            if (m.find()) chrome = m.group(1);
-        }
-        if (chrome == null || chrome.isEmpty()) chrome = "70.0.0.0";
-        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                + "(KHTML, like Gecko) Chrome/" + chrome + " Safari/537.36";
-    }
-
-    private void loadHome() {
-        String last = prefs.getString("last", "");
-        String pid = findPid(last);
-        backupSlug = findBackupSlug(last);
-        resetForNewPage(HOME);
-        web.loadUrl(HOME + (pid.isEmpty() ? "" : "?pid=" + pid));
-    }
-
-    private void resetForNewPage(String url) {
-        bootOk = false;
-        // v1.4.0：everPlaying 表示"本次 App 会话曾出过画面"，一旦为 true 不再回退。
-        // 页面因换台/手动重载而重开时保留它，任何计时器都不会被重新点燃。
-        injectCount = 0;
-        // v1.5.0：整页重载会清空 JS 上下文，探测状态必须一起归零，
-        // 否则 ticker 误以为脚本还在、不再重注入。pendingOk 保留：用户在
-        // 重载窗口按过的确定键仍要在新页面补发。
-        scriptPresent = false;
-        picStreak = 0;
-        pageSince = System.currentTimeMillis();
-        hostText = hostOf(url);
-        bootText = "未注入";
-        picText = "等待中";
-        stageText = "正在加载网页…";
-        errText = "";
-        // v1.5.0：不再自动弹出自检条（默认隐藏由 diagHidden 控制）。
-        // 启动期状态改由原生启动遮罩承载，用户按 0 才查看自检详情。
-        updateDiag();
-    }
-
-    /** 注入频道表 + 注入层；幂等由 JS 侧 ready 标记保证，失败可重入 */
-    private void inject() {
-        if (web == null || injectJs.isEmpty()) return;
-        injectCount++;
-        lastInjectAt = System.currentTimeMillis();
-        String script = "window.__LINKTV_MODE__='tv';"
-                + "window.__LINKTV_FIT__='cover';"
-                + "window.__LINKTV_NATIVE_KEYS__=true;\n"
-                + channelsJs + "\n" + injectJs;
-        web.evaluateJavascript(script, null);
-        bootText = "注入中";
-        updateDiag();
-    }
-
-    /** 原生看门狗：不依赖注入层是否存活 */
-    private final Runnable ticker = new Runnable() {
-        @Override
-        public void run() {
-            if (web == null) return;
-            long el = System.currentTimeMillis() - pageSince;
-
-            web.evaluateJavascript(PROBE, new ValueCallback<String>() {
-                @Override
-                public void onReceiveValue(String value) {
-                    applyProbe(value);
-                }
-            });
-
-            // 脚本完全没挂载（NO）才重注入；PRESENT（已挂载正在 boot）不要打断它。
-            // 但 PRESENT 卡死超过 8 秒仍要兜底重试，避免 boot 中途抛错后再也起不来。
-            boolean stuck = scriptPresent && !bootOk && el > 8000;
-            if ((!scriptPresent || stuck) && el > 2500 && injectCount < 8
-                    && System.currentTimeMillis() - lastInjectAt > 1800) {
-                inject();
-            }
-            // v1.4.0：看门狗只观察、只提示，绝不自动 loadUrl。
-            // 自动切源会触发 onPageStarted，与 everPlaying 重置互相点火 → 重载死循环。
-            if (el > 30000 && !everPlaying && !"连接较慢".equals(stageText)) {
-                stageText = "连接较慢";
-                errText = "正在等待官方直播；如长时间无画面，按 [9] 重新加载";
-                setCoverTip("连接较慢，仍在等待官方直播…");
-                updateDiag();
-            }
-            ui.postDelayed(this, 2000);
-        }
-    };
-
-    private void applyProbe(String value) {
-        String s = value == null ? "" : value;
-        if (s.length() >= 2 && s.startsWith("\"") && s.endsWith("\""))
-            s = s.substring(1, s.length() - 1).replace("\\\"", "\"").replace("\\\\", "\\");
-        String[] p = s.split("\\|", -1);
-        if (p.length < 6) return;
-        String head = p[0];
-        // PRESENT：注入脚本已挂载、按键入口已就绪，但 DIAG 还没定义（boot 中）。
-        // 此时绝不重注入（会打断 boot），但允许补发排队的确定键。
-        scriptPresent = "PRESENT".equals(head)
-                || (!"NO".equals(head) && !"ERR".equals(head));
-        if ("PRESENT".equals(head)) {
-            bootText = "初始化中…";
-            flushPendingOk();
-            updateDiag();
-            return;
-        }
-        // 若注入层被误判成 demo 模式（早注入），视为未就绪，让 ticker 继续重注入救回
-        if (p.length > 5 && "demo".equals(p[5])) {
-            bootOk = false;
-            bootText = "模式异常 · 重注入中";
-            stageText = "正在重新初始化…";
-            updateDiag();
-            return;
-        }
-        if (!"NO".equals(head) && !"ERR".equals(head)) {
-            bootOk = true;
-            bootText = "已就绪 · 清理×" + p[1];
-            capText = "Chrome " + chromeVer + " | MSE " + ("1".equals(p[3]) ? "支持" : "不支持")
-                    + " | WASM " + ("1".equals(p[4]) ? "支持" : "不支持");
-            if ("0".equals(p[3]) || "0".equals(p[4])) {
-                capText += "（官方播放器可能不可用）";
-            }
-            if ("PIC".equals(head)) {
-                everPlaying = true;
-                picText = "已出画面";
-                stageText = "播放中";
-                // 连续两次探测到出画面才揭开启动遮罩，避免视频刚 attach 就露出网页浮层
-                if (++picStreak >= 2) revealCover();
-            } else {
-                if (!everPlaying) { picText = "等待画面"; picStreak = 0; }
-            }
-            flushPendingOk();
-        } else if (!bootOk) {
-            bootText = "未就绪" + ("ERR".equals(head) ? "（脚本报错）" : "");
-        }
-        updateDiag();
-    }
-
-    /** v1.5.0：注入层一就绪，就把启动期用户按过的确定键补发一次，绝不丢键 */
-    private void flushPendingOk() {
-        if (!pendingOk || !scriptPresent || web == null) return;
-        pendingOk = false;
-        web.evaluateJavascript(FLUSH_OK, null);
-    }
-
-    /** v1.4.0：唯一的整页重载入口，只由用户主动按数字键 9 触发，绝不自动调用 */
-    private void reloadCurrent() {
-        String last = prefs.getString("last", "");
-        String pid = findPid(last);
-        stageText = "正在重新加载…";
-        errText = "";
-        // v1.5.0：重新盖上启动遮罩，重载期间的官网原貌/浮层一律不露出；
-        // 自检条保持用户的显隐选择，不强制弹出。
-        showCoverAgain();
-        scriptPresent = false; bootOk = false; picStreak = 0; pendingOk = false;
-        web.loadUrl(HOME + (pid.isEmpty() ? "" : "?pid=" + pid));
-    }
-
-    private void showCoverAgain() {
-        if (bootCover == null) return;
-        coverShown = true;
-        bootCover.animate().cancel();
-        bootCover.setAlpha(1f);
-        bootCover.setVisibility(View.VISIBLE);
-        bootCover.bringToFront();
-        setCoverTip("正在重新加载频道…");
-    }
-
-    private void onReport(String stage, String detail) {
-        if (stage == null) return;
-        if (detail == null) detail = "";
-        switch (stage) {
-            case "ui":
-                bootOk = true; bootText = "已就绪";
-                if (detail.contains("host=")) hostText = detail.split("host=", 2)[1];
-                stageText = "界面已挂载，正在连接直播…";
-                break;
-            case "loaded": stageText = "官方网页已加载"; break;
-            case "connecting": stageText = "正在连接官方直播…"; break;
-            case "playing":
-                everPlaying = true; picText = String.valueOf(detail);
-                stageText = "播放中";
-                // 注入层主动确认出画面（videoOK 更严格），立即揭开启动遮罩
-                revealCover();
-                break;
-            case "backup": stageText = "正在切换备用线路…"; break;
-            case "needBackup": return;   // v1.4.0：注入层已不再上报，防御性忽略
-            case "failed":
-                stageText = "连接失败"; errText = String.valueOf(detail);
-                setCoverTip("连接失败 · 按 [9] 重新加载");
-                break;   // v1.5.0：不自动弹自检条
-            case "error":
-                // v1.4.0：注入层自身异常只记一行小字，不把主状态刷成"脚本异常"。
-                errText = String.valueOf(detail);
-                break;
-            case "notready":
-                // v1.5.0：注入层还没 boot 完时用户按了键 —— 由原生 pendingOk 排队补发，
-                // 不再弹自检条，只把状态写到启动遮罩上。
-                stageText = String.valueOf(detail);
-                setCoverTip("正在准备选台…");
-                break;
-            default: stageText = stage; break;
-        }
-        updateDiag();
-    }
-
-    /** v1.5.0：轻量反馈，2 秒自动消失，绝不常驻在画面上 */
-    private void toast(final String msg) {
-        runOnUiThread(new Runnable() {
-            @Override public void run() {
-                try { Toast.makeText(MainActivity.this, msg, Toast.LENGTH_SHORT).show(); }
-                catch (Exception ignore) {}
-            }
-        });
-    }
-
-    private void updateDiag() {
-        if (diag == null) return;
-        diag.setVisibility(diagHidden ? View.GONE : View.VISIBLE);
-        StringBuilder sb = new StringBuilder();
-        sb.append("LinkTV v").append(verName).append(" · 电视版自检\n");
-        sb.append("状态：").append(stageText).append("\n");
-        sb.append("网页：").append(hostText)
-          .append("   注入：").append(bootText)
-          .append("   画面：").append(picText).append("\n");
-        sb.append("内核：").append(capText).append("\n");
-        if (!errText.isEmpty()) sb.append("提示：").append(errText).append("\n");
-        sb.append(everPlaying
-                ? "状态正常 · 按 [0] 隐藏/显示自检 · [9] 重新加载"
-                : "[0] 隐藏自检 · [9] 重新加载当前频道");
-        diag.setText(sb.toString());
-        diag.bringToFront();
-    }
-
-    private String hostOf(String url) {
-        if (url == null) return "-";
-        Matcher m = Pattern.compile("https?://([^/]+)").matcher(url);
-        return m.find() ? m.group(1) : url;
-    }
-
-    private String readAsset(String path) {
-        try (InputStream is = getAssets().open(path); ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
-            byte[] buf = new byte[8192];
-            int n;
-            while ((n = is.read(buf)) > 0) bos.write(buf, 0, n);
-            return new String(bos.toByteArray(), "UTF-8");
-        } catch (Exception e) {
-            return "";
-        }
-    }
-
-    private String findPid(String name) {
-        if (name == null || name.isEmpty()) return "";
-        Matcher m = Pattern.compile("n:\\s*\"" + Pattern.quote(name) + "\"[^}]*?p:\\s*\"(\\d+)\"").matcher(channelsJs);
-        return m.find() ? m.group(1) : "";
-    }
-
-    private String findBackupSlug(String name) {
-        if (name == null || name.isEmpty()) return "cctv1";
-        Matcher m = Pattern.compile("n:\\s*\"" + Pattern.quote(name) + "\"[^}]*?b:\\s*\"([a-z0-9]+)\"").matcher(channelsJs);
-        return m.find() ? m.group(1) : "cctv1";
-    }
-
-    private void hideSystemUi() {
-        getWindow().getDecorView().setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+        buildUi();
+        loadChannels();
+        restoreLast();
+        initPlayer();
+        startChannel();
+        ui.postDelayed(new Runnable() {
+            @Override public void run() { tryUpdateInBackground(); }
+        }, 2500);
     }
 
     @Override
-    public void onWindowFocusChanged(boolean hasFocus) {
-        super.onWindowFocusChanged(hasFocus);
-        if (hasFocus) hideSystemUi();
+    protected void onResume() {
+        super.onResume();
+        if (player != null) player.setPlayWhenReady(true);
     }
 
-    /** 前置拦截遥控器按键，避免被 WebView / 网页吞掉 */
     @Override
-    public boolean dispatchKeyEvent(KeyEvent e) {
-        int k = e.getKeyCode();
-        if (e.getAction() == KeyEvent.ACTION_DOWN && k == KeyEvent.KEYCODE_0) {
-            diagHidden = !diagHidden;
-            diag.setAlpha(diagHidden ? 0f : 1f);
-            diag.bringToFront();       // 确保在启动遮罩之上可见
-            updateDiag();
-            return true;
-        }
-        if (e.getAction() == KeyEvent.ACTION_DOWN && k == KeyEvent.KEYCODE_9) {
-            reloadCurrent();   // 用户主动重新加载当前频道
-            return true;
-        }
-        if (e.getAction() == KeyEvent.ACTION_DOWN) {
-            String name = null;
-            switch (k) {
-                case KeyEvent.KEYCODE_DPAD_UP: name = "up"; break;
-                case KeyEvent.KEYCODE_DPAD_DOWN: name = "down"; break;
-                case KeyEvent.KEYCODE_DPAD_LEFT: name = "left"; break;
-                case KeyEvent.KEYCODE_DPAD_RIGHT: name = "right"; break;
-                case KeyEvent.KEYCODE_DPAD_CENTER:
-                case KeyEvent.KEYCODE_ENTER:
-                case KeyEvent.KEYCODE_NUMPAD_ENTER: name = "ok"; break;
-                case KeyEvent.KEYCODE_BACK:
-                case KeyEvent.KEYCODE_ESCAPE: name = "back"; break;
-                case KeyEvent.KEYCODE_MENU:
-                case KeyEvent.KEYCODE_INFO:
-                case KeyEvent.KEYCODE_TV_CONTENTS_MENU: name = "menu"; break;
-                default: break;
-            }
-            if (name != null) {
-                final String keyName = name;
-                // v1.5.0：注入脚本开头就挂载了 __LINKTV_KEY__（带排队），所以只要脚本
-                // 已注入，按键一定收得到。只有"连脚本都还没注入"的极早期才 NOTREADY，
-                // 此时把确定键排队，注入层一就绪就补发，并用轻提示反馈，绝不静默吞掉。
-                String js = "(function(){try{"
-                        + "if(typeof window.__LINKTV_KEY__==='function'){window.__LINKTV_KEY__('" + keyName + "');return 'OK'}"
-                        + "return 'NOTREADY'}catch(e){return 'ERR'}})()";
-                web.evaluateJavascript("window.__LINKTV_NATIVE_KEYS__=true;" + js,
-                        new ValueCallback<String>() {
-                            @Override public void onReceiveValue(String value) {
-                                if (value != null && value.contains("NOTREADY")) {
-                                    if ("ok".equals(keyName)) {
-                                        pendingOk = true;   // 注入层就绪后自动补发开面板
-                                        setCoverTip("正在准备选台…");
-                                    }
-                                    stageText = "界面加载中，请稍候…";
-                                    toast("界面加载中，稍候自动打开选台");
-                                }
-                            }
-                        });
-                return true;
-            }
-        }
-        return super.dispatchKeyEvent(e);
-    }
-
-    /** 存储桥 + 自检上报 */
-    private class Bridge {
-        @JavascriptInterface
-        public String get(String k) { return prefs.getString(k, null); }
-
-        @JavascriptInterface
-        public void set(String k, String v) { prefs.edit().putString(k, v).apply(); }
-
-        @JavascriptInterface
-        public void report(final String stage, final String detail) {
-            runOnUiThread(new Runnable() {
-                @Override public void run() { onReport(stage, detail); }
-            });
-        }
-
-        @JavascriptInterface
-        public void exit() {
-            runOnUiThread(new Runnable() {
-                @Override public void run() {
-                    long now = System.currentTimeMillis();
-                    if (now - lastBackAt < 2200) finish();
-                    else {
-                        lastBackAt = now;
-                        stageText = "再按一次返回键退出";
-                        toast("再按一次返回键退出");   // v1.5.0：轻提示，不弹自检条
-                    }
-                }
-            });
-        }
+    protected void onPause() {
+        super.onPause();
+        if (player != null) player.setPlayWhenReady(false);
     }
 
     @Override
     protected void onDestroy() {
-        ui.removeCallbacksAndMessages(null);
-        if (web != null) { web.destroy(); web = null; }
         super.onDestroy();
+        ui.removeCallbacksAndMessages(null);
+        if (player != null) { player.release(); player = null; }
+    }
+
+    private void fullscreen() {
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (Build.VERSION.SDK_INT >= 28) {
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            getWindow().setAttributes(lp);
+        }
+        View d = getWindow().getDecorView();
+        d.setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+    }
+
+    // ============================ UI 构建（纯代码，无 XML 布局） ============================
+
+    private TextView mkText(float sp, int color, boolean bold) {
+        TextView t = new TextView(this);
+        t.setTextColor(color);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+        t.setTypeface(bold ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+        t.setIncludeFontPadding(false);
+        return t;
+    }
+
+    private FrameLayout.LayoutParams flp(int w, int h, int gravity) {
+        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(w, h);
+        p.gravity = gravity;
+        return p;
+    }
+
+    private void buildUi() {
+        root = new FrameLayout(this);
+        root.setBackgroundColor(0xFF000000);
+        setContentView(root);
+
+        // 1) 视频层：TextureView 是普通 View，参与正常层级合成，
+        //    不像 SurfaceView 打洞(punch-through)那样在部分电视盒子上黑屏。
+        //    尺寸由 applyVideoLayout() 按视频宽高比算 FIT（完整不裁切）。
+        surface = new TextureView(this);
+        root.addView(surface, flp(1, 1, Gravity.CENTER));
+        root.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override
+            public void onLayoutChange(View v, int l, int t, int r, int b,
+                                       int ol, int ot, int or, int ob) {
+                applyVideoLayout();
+            }
+        });
+
+        // 2) 换台 OSD（顶部偏左，2.5 秒淡出）
+        osd = mkText(30f, 0xFFFFFFFF, true);
+        osd.setBackgroundColor(0xAA0A1020);
+        osd.setPadding(dp(26), dp(12), dp(26), dp(12));
+        osd.setAlpha(0f);
+        FrameLayout.LayoutParams op = flp(FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.LEFT);
+        op.topMargin = dp(30); op.leftMargin = dp(36);
+        root.addView(osd, op);
+
+        // 3) 右上角临时提示（收藏/退出等）
+        toast = mkText(26f, 0xFFFFCF4D, true);
+        toast.setBackgroundColor(0xCC080C18);
+        toast.setPadding(dp(24), dp(12), dp(24), dp(12));
+        toast.setAlpha(0f);
+        FrameLayout.LayoutParams tp = flp(FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.RIGHT);
+        tp.topMargin = dp(30); tp.rightMargin = dp(36);
+        root.addView(toast, tp);
+
+        // 4) 底部错误/帮助条
+        errBar = mkText(24f, 0xFFC9D6FF, false);
+        errBar.setBackgroundColor(0xAA0A1020);
+        errBar.setPadding(dp(24), dp(10), dp(24), dp(10));
+        errBar.setAlpha(0f);
+        FrameLayout.LayoutParams ep = flp(FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        ep.bottomMargin = dp(26);
+        root.addView(errBar, ep);
+
+        // 5) 信息条（按 0 显隐，默认隐藏）
+        infoBar = mkText(19f, 0xFFEAF0FF, false);
+        infoBar.setBackgroundColor(0xDD05070D);
+        infoBar.setTypeface(Typeface.MONOSPACE);
+        infoBar.setPadding(dp(22), dp(14), dp(22), dp(14));
+        infoBar.setAlpha(0f);
+        FrameLayout.LayoutParams ip = flp(FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.LEFT);
+        ip.leftMargin = dp(26); ip.bottomMargin = dp(26);
+        root.addView(infoBar, ip);
+
+        // 6) 选台面板（默认隐藏）
+        buildPanel();
+
+        // 7) 启动遮罩（品牌 + 版本 + 连接提示），首帧后淡出
+        cover = new FrameLayout(this);
+        cover.setBackgroundColor(0xFF05070D);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setGravity(Gravity.CENTER);
+        coverTitle = mkText(52f, 0xFFFFFFFF, true);
+        coverTitle.setText("LinkTV");
+        coverTitle.setGravity(Gravity.CENTER);
+        TextView ver = mkText(22f, 0xFF6C8CFF, false);
+        ver.setText("v" + verName + " · 原生播放器版");
+        ver.setGravity(Gravity.CENTER);
+        coverTip = mkText(24f, 0xFFB8C6E6, false);
+        coverTip.setText("正在连接直播…");
+        coverTip.setGravity(Gravity.CENTER);
+        coverTip.setPadding(0, dp(24), 0, 0);
+        box.addView(coverTitle);
+        box.addView(ver);
+        box.addView(coverTip);
+        cover.addView(box, flp(FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
+        root.addView(cover, flp(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER));
+    }
+
+    private void buildPanel() {
+        panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.HORIZONTAL);
+        panel.setBackgroundColor(0xEE0A1020);
+        panel.setVisibility(View.GONE);
+
+        // 左：分类栏
+        catCol = new LinearLayout(this);
+        catCol.setOrientation(LinearLayout.VERTICAL);
+        catCol.setBackgroundColor(0xFF0C1428);
+        catCol.setPadding(dp(18), dp(18), dp(18), dp(18));
+        catTitle = mkText(22f, 0xFF6C8CFF, true);
+        catTitle.setText("频道分类");
+        catTitle.setPadding(dp(10), 0, 0, dp(10));
+        catCol.addView(catTitle);
+        for (int i = 0; i < CAT_ROWS; i++) {
+            TextView t = mkText(25f, 0xFFD8E2FA, false);
+            t.setPadding(dp(14), dp(11), dp(14), dp(11));
+            catRows[i] = t;
+            catCol.addView(t, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
+        panel.addView(catCol, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.MATCH_PARENT, 0.30f));
+
+        // 右：频道栏
+        chanCol = new LinearLayout(this);
+        chanCol.setOrientation(LinearLayout.VERTICAL);
+        chanCol.setPadding(dp(24), dp(18), dp(24), dp(18));
+        chanTitle = mkText(22f, 0xFF6C8CFF, true);
+        chanTitle.setText("频道列表");
+        chanTitle.setPadding(dp(10), 0, 0, dp(10));
+        chanCol.addView(chanTitle);
+        for (int i = 0; i < CHAN_ROWS; i++) {
+            TextView t = mkText(26f, 0xFFEAF0FF, false);
+            t.setPadding(dp(14), dp(10), dp(14), dp(10));
+            chanRows[i] = t;
+            chanCol.addView(t, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
+        TextView help = mkText(19f, 0xFF7E8CB0, false);
+        help.setText("↑↓ 选台 / ←→ 分类 / 确定 播放 / 菜单 收藏 / 返回 关闭 / 0 信息 / 9 重载");
+        help.setPadding(dp(10), dp(14), 0, 0);
+        chanCol.addView(help);
+        panel.addView(chanCol, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.MATCH_PARENT, 0.70f));
+
+        root.addView(panel, flp(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER));
+    }
+
+    private int dp(int v) {
+        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
+                getResources().getDisplayMetrics());
+    }
+
+    /** FIT(contain)：完整显示不裁切；16:9 源在超宽屏两侧留等量黑边 */
+    private void applyVideoLayout() {
+        if (root == null || surface == null) return;
+        int cw = root.getWidth(), ch = root.getHeight();
+        if (cw <= 0 || ch <= 0) return;
+        int w = cw, h = ch;
+        if (videoW > 0 && videoH > 0) {
+            float ar = (float) videoW / (float) videoH;
+            if (ar <= 0f) ar = 16f / 9f;
+            w = cw;
+            h = (int) (cw / ar);
+            if (h > ch) { h = ch; w = (int) (ch * ar); }
+        }
+        if (w < 1) w = 1;
+        if (h < 1) h = 1;
+        FrameLayout.LayoutParams p = (FrameLayout.LayoutParams) surface.getLayoutParams();
+        if (p == null) return;
+        if (p.width != w || p.height != h) {
+            p.width = w; p.height = h;
+            p.gravity = Gravity.CENTER;
+            surface.setLayoutParams(p);
+        }
+    }
+
+    // ============================ 频道表 ============================
+
+    /** 读取文本：优先在线更新缓存，否则内置 assets */
+    private String readChannelText() {
+        File f = new File(getFilesDir(), CACHE_FILE);
+        if (f.exists() && f.length() > 20000) {
+            try {
+                String s = readStream(new FileInputStream(f));
+                if (countExtinf(s) >= 100) {
+                    sourceInfo = "在线缓存 " + countExtinf(s) + " 条";
+                    return s;
+                }
+            } catch (Exception ignore) {}
+        }
+        try {
+            String s = readStream(getAssets().open(HOME_ASSET));
+            sourceInfo = "内置 " + countExtinf(s) + " 条";
+            return s;
+        } catch (Exception e) {
+            Log.e(TAG, "内置频道表读取失败", e);
+            sourceInfo = "内置频道表读取失败";
+            return "";
+        }
+    }
+
+    private String readStream(InputStream is) throws Exception {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = is.read(buf)) > 0) bos.write(buf, 0, n);
+        is.close();
+        return new String(bos.toByteArray(), "UTF-8");
+    }
+
+    /** 去掉 TVBox 私有标记 $LR•IPV4『线路N』 及 $ 之后的所有内容 */
+    private String cleanTag(String s) {
+        int i = s.indexOf('$');
+        if (i >= 0) s = s.substring(0, i);
+        return s.trim();
+    }
+
+    /** 线路排序：m3u8 优先 → https 次之 → rtmp 垫底（播放器不支持，自动跳过） */
+    private int lineRank(String u) {
+        String low = u.toLowerCase();
+        if (low.startsWith("rtmp://")) return 20;
+        int r = low.contains(".m3u8") ? 0 : 10;
+        if (low.startsWith("https://")) r += 0; else r += 1;
+        return r;
+    }
+
+    private void loadChannels() {
+        String text = readChannelText();
+        // 分类名 → (频道名 → Chan)，LinkedHashMap 保持源里的出现顺序
+        LinkedHashMap<String, LinkedHashMap<String, Chan>> map = new LinkedHashMap<>();
+        String curGroup = "未分组", curName = "";
+        int lineCount = 0;
+        for (String raw : text.split("\r?\n")) {
+            String s = raw.trim();
+            if (s.isEmpty()) continue;
+            if (s.startsWith("#EXTINF")) {
+                Matcher m = GROUP_PATTERN.matcher(s);
+                curGroup = (m.find() && !m.group(1).trim().isEmpty())
+                        ? m.group(1).trim() : "未分组";
+                int idx = s.lastIndexOf(',');
+                curName = idx >= 0 ? cleanTag(s.substring(idx + 1)) : "";
+                if (curName.isEmpty()) curName = "未命名频道";
+            } else if (s.startsWith("#")) {
+                continue;
+            } else {
+                String url = cleanTag(s);
+                if (!url.contains("://") || curName.isEmpty()) continue;
+                LinkedHashMap<String, Chan> gm = map.get(curGroup);
+                if (gm == null) { gm = new LinkedHashMap<>(); map.put(curGroup, gm); }
+                Chan ch = gm.get(curName);
+                if (ch == null) { ch = new Chan(curName); gm.put(curName, ch); }
+                ch.urls.add(url);
+                lineCount++;
+            }
+        }
+
+        // 分类排序：预设顺序优先，其余按频道数降序
+        ArrayList<String> names = new ArrayList<>(map.keySet());
+        Collections.sort(names, new Comparator<String>() {
+            @Override public int compare(String a, String b) {
+                int ia = indexOfGroup(a), ib = indexOfGroup(b);
+                if (ia >= 0 && ib >= 0) return ia - ib;
+                if (ia >= 0) return -1;
+                if (ib >= 0) return 1;
+                return map.get(b).size() - map.get(a).size();
+            }
+        });
+        for (String gn : names) {
+            LinkedHashMap<String, Chan> gm = map.get(gn);
+            Grp grp = new Grp(gn);
+            for (Chan ch : gm.values()) {
+                Collections.sort(ch.urls, new Comparator<String>() {
+                    @Override public int compare(String a, String b) {
+                        return lineRank(a) - lineRank(b);
+                    }
+                });
+                if (!ch.urls.isEmpty()) grp.chans.add(ch);
+            }
+            if (!grp.chans.isEmpty()) groups.add(grp);
+        }
+
+        if (groups.isEmpty()) {
+            Grp g = new Grp("央视频道");
+            Chan c = new Chan("频道表缺失");
+            c.urls.add("");
+            g.chans.add(c);
+            groups.add(g);
+            sourceInfo = "频道表解析失败";
+        }
+        Log.i(TAG, "频道表: " + groups.size() + " 分类 / " + totalChannels()
+                + " 频道 / " + lineCount + " 线路 · " + sourceInfo);
+
+        favGroup = new Grp(FAV_NAME);
+        groups.add(0, favGroup);       // 收藏恒为第 0 个分类
+        rebuildFav();
+    }
+
+    private int indexOfGroup(String n) {
+        for (int i = 0; i < GROUP_ORDER.length; i++) {
+            if (GROUP_ORDER[i].equals(n)) return i;
+        }
+        return -1;
+    }
+
+    private int totalChannels() {
+        int t = 0;
+        for (Grp g : groups) t += g.chans.size();
+        return t;
+    }
+
+    private int totalLines() {
+        int t = 0;
+        for (Grp g : groups) for (Chan c : g.chans) t += c.urls.size();
+        return t;
+    }
+
+    private String favKey(String grp, String chan) { return grp + SEP + chan; }
+
+    private void rebuildFav() {
+        favGroup.chans.clear();
+        for (int i = 1; i < groups.size(); i++) {
+            Grp g = groups.get(i);
+            for (Chan c : g.chans) {
+                if (favKeys.contains(favKey(g.name, c.name))) favGroup.chans.add(c);
+            }
+        }
+    }
+
+    private void toggleFav(int gi, int ci) {
+        if (gi < 0 || gi >= groups.size()) return;
+        Grp g = groups.get(gi);
+        if (ci < 0 || ci >= g.chans.size()) return;
+        Chan c = g.chans.get(ci);
+        // 收藏项引用的是原分类对象，需找到它的真实归属分类名
+        String owner = g.name;
+        if (g == favGroup) {
+            owner = "";
+            for (int i = 1; i < groups.size() && owner.isEmpty(); i++) {
+                for (Chan x : groups.get(i).chans) {
+                    if (x == c) { owner = groups.get(i).name; break; }
+                }
+            }
+            if (owner.isEmpty()) owner = g.name;
+        }
+        String key = favKey(owner, c.name);
+        boolean added;
+        if (favKeys.contains(key)) { favKeys.remove(key); added = false; }
+        else { favKeys.add(key); added = true; }
+        prefs.edit().putStringSet("favs", new HashSet<>(favKeys)).apply();
+        rebuildFav();
+        toast(added ? "已收藏：" + c.name : "已取消收藏：" + c.name);
+        if (panelOpen) renderPanel();
+    }
+
+    private void restoreLast() {
+        curGrp = prefs.getInt("lastGrp", 1);
+        curChan = prefs.getInt("lastChan", 0);
+        if (curGrp < 0 || curGrp >= groups.size()) curGrp = groups.size() > 1 ? 1 : 0;
+        if (groups.get(curGrp).chans.isEmpty()) {
+            for (int i = 1; i < groups.size(); i++) {
+                if (!groups.get(i).chans.isEmpty()) { curGrp = i; break; }
+            }
+        }
+        if (curChan < 0 || curChan >= groups.get(curGrp).chans.size()) curChan = 0;
+    }
+
+    private void saveLast() {
+        prefs.edit().putInt("lastGrp", curGrp).putInt("lastChan", curChan).apply();
+    }
+
+    // ============================ 播放器 ============================
+
+    private void initPlayer() {
+        String ua = "Mozilla/5.0 (Linux; Android " + Build.VERSION.RELEASE
+                + "; LinkTV/" + verName + ") AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36";
+        DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
+                .setUserAgent(ua)
+                .setAllowCrossProtocolRedirects(true)   // 源里大量 http→https 302 跳 mp4
+                .setConnectTimeoutMs(8000)
+                .setReadTimeoutMs(15000);
+        DefaultMediaSourceFactory msf = new DefaultMediaSourceFactory(http);
+        player = new ExoPlayer.Builder(this).setMediaSourceFactory(msf).build();
+        player.setVideoTextureView(surface);
+        player.addListener(new Player.Listener() {
+            @Override
+            public void onPlaybackStateChanged(int state) {
+                if (state == Player.STATE_READY) {
+                    onPictureUp();
+                } else if (state == Player.STATE_BUFFERING) {
+                    setCoverTip("正在缓冲…");
+                } else if (state == Player.STATE_ENDED) {
+                    onLineFailed();
+                }
+            }
+
+            @Override
+            public void onRenderedFirstFrame() {
+                onPictureUp();
+            }
+
+            @Override
+            public void onVideoSizeChanged(VideoSize size) {
+                videoW = size.width;
+                videoH = size.height;
+                applyVideoLayout();
+            }
+
+            @Override
+            public void onPlayerError(PlaybackException error) {
+                Log.w(TAG, "线路失败: " + (error == null ? "?" : error.getMessage()));
+                onLineFailed();
+            }
+        });
+    }
+
+    /** 是否含明确的视频后缀（含 query） */
+    private boolean knownSuffix(String low) {
+        return low.contains(".m3u8") || low.contains(".mp4") || low.contains(".flv")
+                || low.contains(".ts") || low.contains(".mkv") || low.contains(".m4v")
+                || low.contains(".avi") || low.contains(".3gp") || low.contains(".mov");
+    }
+
+    /** 无明确后缀的 URL 给两次机会：先按自动(progressive)，再强制 HLS */
+    private int variantsOf(String url) {
+        return knownSuffix(url.toLowerCase()) ? 1 : 2;
+    }
+
+    private MediaItem buildItem(String url, int variant) {
+        MediaItem.Builder b = new MediaItem.Builder().setUri(url);
+        String low = url.toLowerCase();
+        if (low.contains(".m3u8")) {
+            b.setMimeType(MimeTypes.APPLICATION_M3U8);
+        } else if (!knownSuffix(low) && variant == 1) {
+            // .php 中转 / 无后缀流：第二步强制按 HLS 解析
+            b.setMimeType(MimeTypes.APPLICATION_M3U8);
+        }
+        return b.build();
+    }
+
+    private Chan curChannel() {
+        if (curGrp < 0 || curGrp >= groups.size()) return null;
+        Grp g = groups.get(curGrp);
+        if (curChan < 0 || curChan >= g.chans.size()) return null;
+        return g.chans.get(curChan);
+    }
+
+    /** 换台（用户主动）：重置全部索引；只换 MediaItem，绝不重建页面/Activity */
+    private void startChannel() {
+        curLine = 0; curVariant = 0; attempts = 0;
+        lastSwitchAt = 0;
+        Chan c = curChannel();
+        if (c == null) { giveUp(); return; }
+        saveLast();
+        showOsd(c.name);
+        setCoverTip("正在连接：" + c.name);
+        playCurrent();
+    }
+
+    private void playCurrent() {
+        Chan c = curChannel();
+        if (c == null) { giveUp(); return; }
+        if (curLine >= c.urls.size()) { giveUp(); return; }
+        String url = c.urls.get(curLine);
+        if (url == null || url.isEmpty()) { onLineFailed(); return; }
+        // ExoPlayer 不支持 rtmp，直接跳过这条线路
+        if (url.toLowerCase().startsWith("rtmp://")) { onLineFailed(); return; }
+        try {
+            player.setMediaItem(buildItem(url, curVariant));
+            player.prepare();
+            player.setPlayWhenReady(true);
+            setCoverTip("线路 " + (curLine + 1) + "/" + c.urls.size() + " · " + c.name);
+            updateInfo();
+        } catch (Exception e) {
+            Log.w(TAG, "setMediaItem 异常", e);
+            onLineFailed();
+        }
+    }
+
+    /** 失败前进：先换协议变体，再换线路；索引单调递增 + 次数上限，绝不循环 */
+    private void onLineFailed() {
+        long now = System.currentTimeMillis();
+        if (now - lastSwitchAt < 350) return;   // 防抖：同一次失败只前进一次
+        lastSwitchAt = now;
+        Chan c = curChannel();
+        if (c == null) { giveUp(); return; }
+        if (curLine >= c.urls.size() || attempts >= MAX_ATTEMPTS) { giveUp(); return; }
+        attempts++;
+        int vars = variantsOf(c.urls.get(curLine));
+        curVariant++;
+        if (curVariant >= vars) {
+            curVariant = 0;
+            curLine++;
+        }
+        if (curLine >= c.urls.size()) { giveUp(); return; }
+        setCoverTip("切换线路 " + (curLine + 1) + "/" + c.urls.size() + "…");
+        playCurrent();
+    }
+
+    private void giveUp() {
+        showErr("该频道线路均不可用 · 按 ↑↓ 换台 / 确定 选台");
+        revealCover();          // 揭开遮罩，让用户仍能操作，不卡在「正在连接」
+        updateInfo();
+    }
+
+    private void onPictureUp() {
+        if (coverShown) revealCover();
+        setErr("");
+        updateInfo();
+    }
+
+    private void revealCover() {
+        coverShown = false;
+        if (cover == null) return;
+        cover.animate().cancel();
+        cover.animate().alpha(0f).setDuration(350).withEndAction(new Runnable() {
+            @Override public void run() { cover.setVisibility(View.GONE); }
+        }).start();
+    }
+
+    private void setCoverTip(String s) {
+        if (coverTip != null && coverShown) coverTip.setText(s);
+    }
+
+    // ============================ 面板 ============================
+
+    private void openPanel() {
+        panelOpen = true;
+        panelGrp = clamp(curGrp, 0, groups.size() - 1);
+        panelChan = clamp(curChan, 0, Math.max(0, groups.get(panelGrp).chans.size() - 1));
+        zone = 1;
+        panel.setVisibility(View.VISIBLE);
+        panel.bringToFront();
+        cover.bringToFront();
+        renderPanel();
+    }
+
+    private void closePanel() {
+        panelOpen = false;
+        panel.setVisibility(View.GONE);
+    }
+
+    private void renderPanel() {
+        if (!panelOpen) return;
+        Grp g = groups.get(panelGrp);
+        chanTitle.setText(g.name + " · " + g.chans.size() + " 个频道"
+                + (zone == 1 ? "   ▸ 频道栏" : "   ▸ 分类栏"));
+        catTitle.setText("频道分类 · " + (groups.size() - 1));
+
+        int catTop = clamp(panelGrp - CAT_ROWS / 2, 0, Math.max(0, groups.size() - CAT_ROWS));
+        for (int i = 0; i < CAT_ROWS; i++) {
+            int idx = catTop + i;
+            TextView t = catRows[i];
+            if (idx >= groups.size()) { t.setText(""); t.setBackgroundColor(0); continue; }
+            Grp gg = groups.get(idx);
+            boolean sel = idx == panelGrp;
+            t.setText((sel && zone == 0 ? "▶ " : "   ") + gg.name + "  " + gg.chans.size());
+            t.setTextColor(sel ? (zone == 0 ? 0xFFFFCF4D : 0xFFFFFFFF) : 0xFFA8B6D8);
+            t.setBackgroundColor(sel ? 0x33FFCF4D : 0);
+        }
+
+        int chanTop = clamp(panelChan - CHAN_ROWS / 2, 0,
+                Math.max(0, g.chans.size() - CHAN_ROWS));
+        for (int i = 0; i < CHAN_ROWS; i++) {
+            int idx = chanTop + i;
+            TextView t = chanRows[i];
+            if (idx >= g.chans.size()) { t.setText(""); t.setBackgroundColor(0); continue; }
+            Chan c = g.chans.get(idx);
+            boolean sel = idx == panelChan;
+            t.setText((sel && zone == 1 ? "▶ " : "   ") + c.name
+                    + (c.urls.size() > 1 ? "   ·  " + c.urls.size() + " 线路" : ""));
+            t.setTextColor(sel ? (zone == 1 ? 0xFFFFCF4D : 0xFFFFFFFF) : 0xFFD8E2FA);
+            t.setBackgroundColor(sel ? 0x336C8CFF : 0);
+        }
+        updateInfo();
+    }
+
+    private static int clamp(int v, int lo, int hi) {
+        return hi < lo ? lo : (v < lo ? lo : (v > hi ? hi : v));
+    }
+
+    // ============================ 按键（前置拦截，完全不依赖网页） ============================
+
+    private boolean handledKey(int k) {
+        switch (k) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+            case KeyEvent.KEYCODE_BACK:
+            case KeyEvent.KEYCODE_ESCAPE:
+            case KeyEvent.KEYCODE_MENU:
+            case KeyEvent.KEYCODE_INFO:
+            case KeyEvent.KEYCODE_TV_CONTENTS_MENU:
+            case KeyEvent.KEYCODE_0: case KeyEvent.KEYCODE_1: case KeyEvent.KEYCODE_2:
+            case KeyEvent.KEYCODE_3: case KeyEvent.KEYCODE_4: case KeyEvent.KEYCODE_5:
+            case KeyEvent.KEYCODE_6: case KeyEvent.KEYCODE_7: case KeyEvent.KEYCODE_8:
+            case KeyEvent.KEYCODE_9:
+                return true;
+            default: return false;
+        }
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent e) {
+        int k = e.getKeyCode();
+        if (!handledKey(k)) return super.dispatchKeyEvent(e);
+        if (e.getAction() == KeyEvent.ACTION_UP) return true;   // UP 一起消费，避免系统默认行为
+        handleKey(k);
+        return true;
+    }
+
+    private void handleKey(int k) {
+        switch (k) {
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                onOk();
+                break;
+            case KeyEvent.KEYCODE_BACK:
+            case KeyEvent.KEYCODE_ESCAPE:
+                onBack();
+                break;
+            case KeyEvent.KEYCODE_DPAD_UP: onUpDown(-1); break;
+            case KeyEvent.KEYCODE_DPAD_DOWN: onUpDown(1); break;
+            case KeyEvent.KEYCODE_DPAD_LEFT: onLeftRight(-1); break;
+            case KeyEvent.KEYCODE_DPAD_RIGHT: onLeftRight(1); break;
+            case KeyEvent.KEYCODE_MENU:
+            case KeyEvent.KEYCODE_INFO:
+            case KeyEvent.KEYCODE_TV_CONTENTS_MENU:
+                toggleFav(panelOpen && zone == 1 ? panelGrp : curGrp,
+                          panelOpen && zone == 1 ? panelChan : curChan);
+                break;
+            case KeyEvent.KEYCODE_0:
+                infoHidden = !infoHidden;
+                infoBar.setAlpha(infoHidden ? 0f : 1f);
+                updateInfo();
+                break;
+            case KeyEvent.KEYCODE_9:
+                toast("重新加载当前频道");
+                startChannel();
+                break;
+            default:
+                // 数字 1-8 保留，暂不绑定动作
+                break;
+        }
+    }
+
+    private void onOk() {
+        if (!panelOpen) { openPanel(); return; }
+        if (zone == 0) { zone = 1; renderPanel(); return; }
+        Grp g = groups.get(panelGrp);
+        if (g.chans.isEmpty()) { toast("该分类暂无频道"); return; }
+        curGrp = panelGrp;
+        curChan = clamp(panelChan, 0, g.chans.size() - 1);
+        closePanel();
+        startChannel();
+    }
+
+    private void onBack() {
+        if (panelOpen) { closePanel(); return; }
+        long now = System.currentTimeMillis();
+        if (now - lastBackAt < 2500) { finish(); return; }
+        lastBackAt = now;
+        toast("再按一次返回键退出");
+    }
+
+    private void onUpDown(int dir) {
+        if (panelOpen) {
+            if (zone == 0) {
+                panelGrp = clamp(panelGrp + dir, 0, groups.size() - 1);
+                panelChan = 0;
+            } else {
+                Grp g = groups.get(panelGrp);
+                if (!g.chans.isEmpty())
+                    panelChan = clamp(panelChan + dir, 0, g.chans.size() - 1);
+            }
+            renderPanel();
+        } else {
+            // 在当前分类内循环换台，绝不跨分类（v1.x 用户明确要求）
+            Grp g = groups.get(curGrp);
+            if (g.chans.isEmpty()) return;
+            curChan = (curChan + dir + g.chans.size()) % g.chans.size();
+            startChannel();
+        }
+    }
+
+    private void onLeftRight(int dir) {
+        if (panelOpen) {
+            zone = (dir < 0) ? 0 : 1;
+            renderPanel();
+        } else {
+            // 切分类并播该分类第一个频道（跳过空的收藏分类）
+            int n = groups.size();
+            for (int step = 1; step <= n; step++) {
+                int gi = (curGrp + dir * step + n * n) % n;
+                if (!groups.get(gi).chans.isEmpty()) {
+                    curGrp = gi; curChan = 0;
+                    startChannel();
+                    return;
+                }
+            }
+        }
+    }
+
+    // ============================ 提示 / 信息条 ============================
+
+    private void toast(String msg) {
+        ui.removeCallbacks(hideToast);
+        toast.setText(msg);
+        toast.setAlpha(1f);
+        toast.bringToFront();
+        ui.postDelayed(hideToast, 2200);
+    }
+
+    private void showOsd(String chan) {
+        ui.removeCallbacks(hideOsd);
+        osd.setText(chan);
+        osd.setAlpha(1f);
+        osd.bringToFront();
+        ui.postDelayed(hideOsd, 2500);
+    }
+
+    private void showErr(String s) { setErr(s); }
+
+    private void setErr(String s) {
+        if (errBar == null) return;
+        if (s == null || s.isEmpty()) { errBar.setAlpha(0f); return; }
+        errBar.setText(s);
+        errBar.setAlpha(1f);
+        errBar.bringToFront();
+    }
+
+    private void updateInfo() {
+        if (infoBar == null) return;
+        Chan c = curChannel();
+        String url = (c != null && curLine < c.urls.size()) ? c.urls.get(curLine) : "-";
+        if (url.length() > 62) url = url.substring(0, 62) + "…";
+        String state = "准备中";
+        if (player != null) {
+            int s = player.getPlaybackState();
+            if (s == Player.STATE_READY) state = player.isPlaying() ? "播放中" : "已就绪";
+            else if (s == Player.STATE_BUFFERING) state = "缓冲中";
+            else if (s == Player.STATE_IDLE) state = "空闲";
+            else if (s == Player.STATE_ENDED) state = "已结束";
+        }
+        infoBar.setText(
+                "LinkTV v" + verName + " · 原生播放器版\n"
+                + "状态：" + state + "   分类：" + (curGrp >= 0 && curGrp < groups.size()
+                        ? groups.get(curGrp).name : "-") + "\n"
+                + "频道：" + (c == null ? "-" : c.name) + "\n"
+                + "线路：" + (curLine + 1) + "/" + (c == null ? 0 : c.urls.size())
+                + "   尝试：" + attempts + "/" + MAX_ATTEMPTS + "\n"
+                + "地址：" + url + "\n"
+                + "数据：" + groups.size() + " 分类(含收藏) · " + totalChannels()
+                + " 频道 · " + totalLines() + " 线路 · " + sourceInfo + "\n"
+                + "操作：确定 选台 / ↑↓ 换台 / ←→ 分类 / 菜单 收藏 / 0 隐藏 / 9 重载");
+    }
+
+    // ============================ 在线更新（尽力而为，失败静默用内置表） ============================
+
+    private void tryUpdateInBackground() {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    java.net.HttpURLConnection conn =
+                            (java.net.HttpURLConnection) new java.net.URL(UPDATE_URL).openConnection();
+                    conn.setConnectTimeout(8000);
+                    conn.setReadTimeout(12000);
+                    conn.setInstanceFollowRedirects(true);
+                    conn.setRequestProperty("User-Agent", "LinkTV/" + verName);
+                    int code = conn.getResponseCode();
+                    if (code != 200) { conn.disconnect(); return; }
+                    InputStream is = conn.getInputStream();
+                    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                    byte[] buf = new byte[8192];
+                    int n, total = 0;
+                    while ((n = is.read(buf)) > 0 && total < 2_000_000) {
+                        bos.write(buf, 0, n); total += n;
+                    }
+                    is.close(); conn.disconnect();
+                    String text = new String(bos.toByteArray(), "UTF-8");
+                    // 校验：必须是像样的 m3u（至少 100 个频道）才落盘，避免坏数据覆盖内置表
+                    int cnt = countExtinf(text);
+                    if (cnt < 100) return;
+                    java.io.File f = new java.io.File(getFilesDir(), "tv.m3u");
+                    java.io.FileOutputStream fos = new java.io.FileOutputStream(f);
+                    fos.write(bos.toByteArray()); fos.close();
+                    Log.i(TAG, "频道源已更新缓存: " + cnt + " 条，下次启动生效");
+                } catch (Exception ignore) {
+                    // 网络不可用 / 源失效：静默，继续用内置表，绝不阻塞播放
+                }
+            }
+        }, "linktv-update").start();
+    }
+
+    private int countExtinf(String s) {
+        int c = 0, i = 0;
+        while ((i = s.indexOf("#EXTINF", i)) >= 0) { c++; i += 7; }
+        return c;
     }
 }

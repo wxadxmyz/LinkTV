@@ -5,10 +5,12 @@
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowActionBar">false</item>
         <item name="android:windowContentOverlay">@null</item>
-        <!-- 启动窗口直接黑底，避免部分电视在 WebView 首帧前闪出白色方块 -->
+        <!-- 启动窗口直接黑底，避免首帧前闪出白色方块 -->
         <item name="android:windowBackground">@android:color/black</item>
         <item name="android:statusBarColor">#000000</item>
         <item name="android:navigationBarColor">#000000</item>
         <item name="android:colorBackground">#000000</item>
+        <!-- v2.0.0：内容延伸到刘海/挖孔区（API 28+），手机横屏不再留单侧黑边 -->
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="p">shortEdges</item>
     </style>
 </resources>

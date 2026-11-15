@@ -83,7 +83,7 @@ jobs:
           retention-days: 30
 
       # 版本化正式 Release：下载链接形如
-      # https://github.com/wxadxmyz/LinkTV/releases/download/v1.5.0/LinkTV-v1.5.0.apk
+      # https://github.com/wxadxmyz/LinkTV/releases/download/v2.0.0/LinkTV-v2.0.0.apk
       - name: Publish versioned release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
@@ -92,16 +92,23 @@ jobs:
           set -e
           TAG="v${VERSION}"
           APK="$APK_PATH"
-          NOTE="## LinkTV v${VERSION}
+          NOTE="## LinkTV v${VERSION} · 原生播放器版
 
           安卓电视直播（debug 签名，可直接安装到电视 / 盒子 / 手机）。
 
           **下载：\`LinkTV-v${VERSION}.apk\`**（本页 Assets 中，文件名已含版本号）
 
-          - 打开即全屏：原生启动遮罩盖住网页加载期，出画面才揭开
-          - 确定键调出频道面板；上下换台；左右/左栏切分类；菜单收藏
-          - 自检条默认隐藏，按遥控器 \`0\` 显隐；按 \`9\` 手动重载
-          - 频道：CCTV 全系列 18 台 + 31 个省级卫视，共 49 台，接央视频官方直播页
+          **架构重写**：弃用「WebView 打开央视频官网网页 + 注入 JS」，改为原生 Media3 ExoPlayer 直接播放直播流。
+          - 打开即播（1~3 秒出画面），不再等官网加载 20 秒、不再露官网原貌
+          - 确定键任何时候都能调出频道面板（原生绘制，不受网页焦点影响）
+          - 上下换台（本分类内循环，不跨分类）；左右切分类；菜单收藏；返回关闭/双击退出
+          - 全量频道表内置：620 条线路 / 12 个分类 / 404 个频道（央视、卫视、省级、新闻、影视、少儿、海外、DJ舞曲、历届春晚、地区、未分组全部保留）
+          - 每条频道多线路，播放失败自动切下一条（有限次、只换流不重建页面，不会死循环）
+          - 画面按视频宽高比完整显示不裁切，兼容手机超宽屏与挖孔屏
+          - 信息条默认隐藏，按遥控器 \`0\` 显隐；按 \`9\` 重新加载当前频道
+          - 后台尝试从 gitee 拉取最新频道源，下次启动优先用缓存，源失效可自愈
+
+          直播源来自用户提供的第三方聚合流（\`muhai-live/tv.m3u\`），非官方授权，线路可能失效，已用多备线兜底。
 
           构建于 $(date -u +'%Y-%m-%d %H:%M UTC')，commit ${GITHUB_SHA:0:7}。"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
@@ -125,8 +132,11 @@ jobs:
           NOTE="最新构建 v${VERSION}（$(date -u +'%Y-%m-%d %H:%M UTC')），commit ${GITHUB_SHA:0:7}。debug 签名，可直接安装到电视 / 盒子 / 手机。带版本号的正式版见 Releases 中的 v${VERSION}。"
           if gh release view latest --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release upload latest "$APK" --clobber --repo "$GITHUB_REPOSITORY"
-            # 删除历史遗留的无版本号文件，避免用户下到旧包（不存在时忽略）
+            # 删除历史遗留文件（无版本号旧包 + 上一版本的包），避免用户下到旧版
             gh release delete-asset latest "LinkTV-debug.apk" -y --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+            for OLD in $(gh release view latest --json assets --jq '.assets[].name' --repo "$GITHUB_REPOSITORY" 2>/dev/null | grep '^LinkTV-v.*\.apk$' | grep -v "^LinkTV-v${VERSION}\.apk$" || true); do
+              gh release delete-asset latest "$OLD" -y --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+            done
             gh release edit latest --title "LinkTV 最新构建 · v${VERSION}" --notes "$NOTE" --repo "$GITHUB_REPOSITORY"
           else
             gh release create latest "$APK" \
