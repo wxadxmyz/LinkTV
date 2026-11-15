@@ -4,7 +4,6 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
-import android.graphics.Gravity;
 import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Bundle;
@@ -12,6 +11,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.TextureView;
 import android.view.View;
@@ -101,8 +101,8 @@ public class MainActivity extends Activity {
 
     private ExoPlayer player;
     private TextureView surface;
-    private FrameLayout root, cover, panel;
-    private LinearLayout catCol, chanCol;
+    private FrameLayout root, cover;
+    private LinearLayout panel, catCol, chanCol;
     private TextView coverTitle, coverTip, infoBar, osd, toast, errBar, catTitle, chanTitle;
     private final TextView[] catRows = new TextView[CAT_ROWS];
     private final TextView[] chanRows = new TextView[CHAN_ROWS];
