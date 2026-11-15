@@ -13,6 +13,7 @@ import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
@@ -44,7 +45,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * LinkTV v2.0.0 —— 原生播放器电视直播（架构重写）
+ * LinkTV v2.0.1 —— 原生播放器电视直播（架构重写 + 全触屏/极简遥控器适配）
  *
  * 与 v1.x 的根本区别：不再用 WebView 打开央视频官网网页再注入 JS 削成视频。
  * v1.x 的一切顽疾（打开要等 20 秒官网加载/重载、确定键在 NOTREADY 窗口丢失、
@@ -62,6 +63,17 @@ import java.util.regex.Pattern;
  *    自己按视频宽高比算 FIT（contain）：完整显示不裁切，
  *    超宽手机两侧留等量黑边；配合刘海 shortEdges 消除单侧黑边
  *  - 明文 http 线路（源里 389/620 条）由 usesCleartextTraffic 放行
+ *
+ * v2.0.1（触屏 + 极简遥控器适配，纯交互层，不动播放器/频道表/构建流程）：
+ *  - 手机上「点一下画面」即弹出频道面板（再点一次画面关闭）；面板内分类行/频道行
+ *    可直接点：点分类切分类、点频道立即换台并关面板
+ *  - 触屏手势：左右滑切分类、上下滑换台、长按画面收藏
+ *  - 面板底部新增两个可点条目「重新加载」「线路信息」，把原先只挂在数字键 0/9 上的
+ *    功能搬进面板 —— 现在极简遥控器（无数字键）也能用方向键移过去按确定触发
+ *  - 信息条改为随面板自动显隐（默认隐藏，开面板即显示），不再依赖 0 键
+ *  - 面板内所有提示文案去掉 0/9，改为真实可用的操作说明
+ *  - 数字键 0/9 保留兼容（老遥控器可用），但不再是唯一入口
+ *  - 核心键位最终只依赖：方向键 + 确定 + 返回 + 菜单（极简遥控器全都有）
  */
 public class MainActivity extends Activity {
 
@@ -72,7 +84,7 @@ public class MainActivity extends Activity {
             "https://gitee.com/xmyzjxn/muhai-live/raw/master/tv.m3u";
     private static final int MAX_ATTEMPTS = 20;      // 单频道换线路硬上限，绝不无限重试
     private static final int CAT_ROWS = 8;           // 分类栏虚拟窗口行数
-    private static final int CHAN_ROWS = 9;          // 频道栏虚拟窗口行数
+    private static final int CHAN_ROWS = 7;          // 频道栏虚拟窗口行数（v2.0.1 腾出空间给工具行/信息条）
     private static final String FAV_NAME = "我的收藏";
     private static final String SEP = "\u0001";
     private static final Pattern GROUP_PATTERN =
@@ -106,11 +118,22 @@ public class MainActivity extends Activity {
     private TextView coverTitle, coverTip, infoBar, osd, toast, errBar, catTitle, chanTitle;
     private final TextView[] catRows = new TextView[CAT_ROWS];
     private final TextView[] chanRows = new TextView[CHAN_ROWS];
+    private final TextView[] toolRows = new TextView[2];      // v2.0.1 面板底部工具条目
+    private final int[] catRowIdx = new int[CAT_ROWS];         // 每行当前对应的分类下标
+    private final int[] chanRowIdx = new int[CHAN_ROWS];       // 每行当前对应的频道下标
 
     private SharedPreferences prefs;
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private String verName = "2.0.0", sourceInfo = "";
+    private String verName = "2.0.1", sourceInfo = "";
     private int videoW = 0, videoH = 0;
+
+    // v2.0.1 触屏状态（纯 MotionEvent 手动判定，不依赖焦点系统）
+    private float tDownX = 0, tDownY = 0;
+    private long tDownAt = 0;
+    private boolean tMoved = false;
+    private static final float SWIPE_MIN_DP = 48f;   // 超过此位移判定为滑动
+    private static final float TAP_SLOP_DP = 16f;    // 小于此位移才算轻触/长按
+    private static final long LONG_PRESS_MS = 600;   // 超过此时长的轻触判为长按收藏
 
     // 当前播放位置
     private int curGrp = 1, curChan = 0;
@@ -120,7 +143,8 @@ public class MainActivity extends Activity {
 
     // 面板/焦点状态
     private boolean panelOpen = false;
-    private int zone = 1;              // 0=分类栏 1=频道栏
+    private int zone = 1;              // 0=分类栏 1=频道栏 2=工具行（v2.0.1）
+    private int toolSel = 0;           // 工具行内选中：0=重新加载 1=线路信息
     private int panelGrp = 1, panelChan = 0;
     private long lastBackAt = 0;
 
@@ -259,16 +283,7 @@ public class MainActivity extends Activity {
         ep.bottomMargin = dp(26);
         root.addView(errBar, ep);
 
-        // 5) 信息条（按 0 显隐，默认隐藏）
-        infoBar = mkText(19f, 0xFFEAF0FF, false);
-        infoBar.setBackgroundColor(0xDD05070D);
-        infoBar.setTypeface(Typeface.MONOSPACE);
-        infoBar.setPadding(dp(22), dp(14), dp(22), dp(14));
-        infoBar.setAlpha(0f);
-        FrameLayout.LayoutParams ip = flp(FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.LEFT);
-        ip.leftMargin = dp(26); ip.bottomMargin = dp(26);
-        root.addView(infoBar, ip);
+        // 5) 信息条移到面板内（buildPanel 创建）：随面板自动显隐，播放画面上不常驻
 
         // 6) 选台面板（默认隐藏）
         buildPanel();
@@ -304,7 +319,7 @@ public class MainActivity extends Activity {
         panel.setBackgroundColor(0xEE0A1020);
         panel.setVisibility(View.GONE);
 
-        // 左：分类栏
+        // 左：分类栏（v2.0.1 每行可点，真实下标由 renderPanel 写入 catRowIdx）
         catCol = new LinearLayout(this);
         catCol.setOrientation(LinearLayout.VERTICAL);
         catCol.setBackgroundColor(0xFF0C1428);
@@ -317,13 +332,14 @@ public class MainActivity extends Activity {
             TextView t = mkText(25f, 0xFFD8E2FA, false);
             t.setPadding(dp(14), dp(11), dp(14), dp(11));
             catRows[i] = t;
+            catRowIdx[i] = -1;
             catCol.addView(t, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
         panel.addView(catCol, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.MATCH_PARENT, 0.30f));
 
-        // 右：频道栏
+        // 右：频道栏 + 工具行 + 信息条 + 帮助
         chanCol = new LinearLayout(this);
         chanCol.setOrientation(LinearLayout.VERTICAL);
         chanCol.setPadding(dp(24), dp(18), dp(24), dp(18));
@@ -335,12 +351,43 @@ public class MainActivity extends Activity {
             TextView t = mkText(26f, 0xFFEAF0FF, false);
             t.setPadding(dp(14), dp(10), dp(14), dp(10));
             chanRows[i] = t;
+            chanRowIdx[i] = -1;
             chanCol.addView(t, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
-        TextView help = mkText(19f, 0xFF7E8CB0, false);
-        help.setText("↑↓ 选台 / ←→ 分类 / 确定 播放 / 菜单 收藏 / 返回 关闭 / 0 信息 / 9 重载");
-        help.setPadding(dp(10), dp(14), 0, 0);
+
+        // v2.0.1：工具行 —— 把原先只挂在数字键 0/9 上的功能搬进面板。
+        // 手机可直接点；电视用方向键把焦点移入「工具行」再按确定触发（见 onOk zone==2）。
+        LinearLayout tools = new LinearLayout(this);
+        tools.setOrientation(LinearLayout.HORIZONTAL);
+        tools.setPadding(0, dp(10), 0, dp(4));
+        String[] toolNames = {"⟳ 重新加载", "ⓘ 线路信息"};
+        for (int i = 0; i < 2; i++) {
+            TextView b = mkText(21f, 0xFFD8E2FA, true);
+            b.setText(toolNames[i]);
+            b.setPadding(dp(14), dp(9), dp(14), dp(9));
+            b.setBackgroundColor(0xFF16224A);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            lp.setMargins(0, 0, dp(12), 0);
+            tools.addView(b, lp);
+            toolRows[i] = b;
+        }
+        chanCol.addView(tools, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // 信息条（放进面板内，默认隐藏；由「线路信息」工具或数字键 0 切换）
+        infoBar = mkText(17f, 0xFFEAF0FF, false);
+        infoBar.setBackgroundColor(0xDD05070D);
+        infoBar.setTypeface(Typeface.MONOSPACE);
+        infoBar.setPadding(dp(16), dp(10), dp(16), dp(10));
+        infoBar.setVisibility(View.GONE);
+        chanCol.addView(infoBar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView help = mkText(17f, 0xFF7E8CB0, false);
+        help.setText("点分类切台 / 点频道直接播 · 确定或点空白 开关面板 · 菜单或长按 收藏 · 上下滑换台 · 左右滑切分类 · 返回关闭");
+        help.setPadding(dp(10), dp(10), 0, 0);
         chanCol.addView(help);
         panel.addView(chanCol, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.MATCH_PARENT, 0.70f));
@@ -701,7 +748,7 @@ public class MainActivity extends Activity {
     }
 
     private void giveUp() {
-        showErr("该频道线路均不可用 · 按 ↑↓ 换台 / 确定 选台");
+        showErr("该频道线路均不可用 · 点画面/确定键选台，或 ↑↓ 换台");
         revealCover();          // 揭开遮罩，让用户仍能操作，不卡在「正在连接」
         updateInfo();
     }
@@ -732,6 +779,8 @@ public class MainActivity extends Activity {
         panelGrp = clamp(curGrp, 0, groups.size() - 1);
         panelChan = clamp(curChan, 0, Math.max(0, groups.get(panelGrp).chans.size() - 1));
         zone = 1;
+        infoHidden = true;                       // v2.0.1：每次开面板默认收起线路信息
+        if (infoBar != null) infoBar.setVisibility(View.GONE);
         panel.setVisibility(View.VISIBLE);
         panel.bringToFront();
         cover.bringToFront();
@@ -741,20 +790,47 @@ public class MainActivity extends Activity {
     private void closePanel() {
         panelOpen = false;
         panel.setVisibility(View.GONE);
+        infoHidden = true;                       // 关面板自动隐藏信息条（随面板显隐）
+        if (infoBar != null) infoBar.setVisibility(View.GONE);
+    }
+
+    /** v2.0.1：切换线路信息条显隐（面板内「线路信息」工具 / 数字键 0 共用） */
+    private void toggleInfo() {
+        infoHidden = !infoHidden;
+        if (infoBar != null) {
+            infoBar.setVisibility(infoHidden ? View.GONE : View.VISIBLE);
+            if (!infoHidden) updateInfo();
+        }
+        if (panelOpen) renderPanel();
+    }
+
+    /** v2.0.1：面板底部两个工具条目（手机点按 / 电视确定键共用） */
+    private void runTool(int which) {
+        if (which == 0) {
+            toast("重新加载当前频道");
+            if (panelOpen) closePanel();
+            startChannel();
+        } else {
+            if (!panelOpen) openPanel();
+            toggleInfo();
+        }
     }
 
     private void renderPanel() {
         if (!panelOpen) return;
         Grp g = groups.get(panelGrp);
-        chanTitle.setText(g.name + " · " + g.chans.size() + " 个频道"
-                + (zone == 1 ? "   ▸ 频道栏" : "   ▸ 分类栏"));
+        String zoneName = zone == 0 ? "分类栏" : (zone == 1 ? "频道栏" : "工具栏");
+        chanTitle.setText(g.name + " · " + g.chans.size() + " 个频道   ▸ " + zoneName);
         catTitle.setText("频道分类 · " + (groups.size() - 1));
 
         int catTop = clamp(panelGrp - CAT_ROWS / 2, 0, Math.max(0, groups.size() - CAT_ROWS));
         for (int i = 0; i < CAT_ROWS; i++) {
             int idx = catTop + i;
             TextView t = catRows[i];
-            if (idx >= groups.size()) { t.setText(""); t.setBackgroundColor(0); continue; }
+            if (idx >= groups.size()) {
+                t.setText(""); t.setBackgroundColor(0); catRowIdx[i] = -1; continue;
+            }
+            catRowIdx[i] = idx;
             Grp gg = groups.get(idx);
             boolean sel = idx == panelGrp;
             t.setText((sel && zone == 0 ? "▶ " : "   ") + gg.name + "  " + gg.chans.size());
@@ -767,7 +843,10 @@ public class MainActivity extends Activity {
         for (int i = 0; i < CHAN_ROWS; i++) {
             int idx = chanTop + i;
             TextView t = chanRows[i];
-            if (idx >= g.chans.size()) { t.setText(""); t.setBackgroundColor(0); continue; }
+            if (idx >= g.chans.size()) {
+                t.setText(""); t.setBackgroundColor(0); chanRowIdx[i] = -1; continue;
+            }
+            chanRowIdx[i] = idx;
             Chan c = g.chans.get(idx);
             boolean sel = idx == panelChan;
             t.setText((sel && zone == 1 ? "▶ " : "   ") + c.name
@@ -775,11 +854,114 @@ public class MainActivity extends Activity {
             t.setTextColor(sel ? (zone == 1 ? 0xFFFFCF4D : 0xFFFFFFFF) : 0xFFD8E2FA);
             t.setBackgroundColor(sel ? 0x336C8CFF : 0);
         }
+
+        // 工具行高亮 + 线路信息开关状态
+        if (toolRows[0] != null) {
+            toolRows[0].setText((zone == 2 && toolSel == 0 ? "▶ " : "   ") + "⟳ 重新加载");
+            toolRows[1].setText((zone == 2 && toolSel == 1 ? "▶ " : "   ")
+                    + "ⓘ 线路信息" + (infoHidden ? "" : "（已展开）"));
+            for (int i = 0; i < 2; i++) {
+                boolean on = zone == 2 && toolSel == i;
+                toolRows[i].setTextColor(on ? 0xFFFFCF4D : 0xFFD8E2FA);
+                toolRows[i].setBackgroundColor(on ? 0x33FFCF4D : 0xFF16224A);
+            }
+        }
         updateInfo();
     }
 
     private static int clamp(int v, int lo, int hi) {
         return hi < lo ? lo : (v < lo ? lo : (v > hi ? hi : v));
+    }
+
+    // ==================== 触屏（v2.0.1：Activity 前置拦截 + 坐标判定，不依赖焦点系统） ====================
+
+    /**
+     * 全屏只有本 Activity，触摸全部自己处理，不往子 View 分发 —— 与 dispatchKeyEvent
+     * 同一思路，彻底杜绝「点屏幕没反应 / 事件被焦点系统吃掉」。
+     *  点画面   = 开/关选台面板；点面板内条目 = 切分类 / 换台 / 工具
+     *  左右滑   = 切分类（面板内为移动焦点区）；上下滑 = 换台（面板内为移动光标）
+     *  长按     = 收藏当前频道（手机没有菜单键时的入口）
+     */
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        if (ev == null) return super.dispatchTouchEvent(ev);
+        if (coverShown) return super.dispatchTouchEvent(ev);   // 启动遮罩期不响应
+        int act = ev.getActionMasked();
+        if (act == MotionEvent.ACTION_DOWN) {
+            tDownX = ev.getRawX(); tDownY = ev.getRawY();
+            tDownAt = System.currentTimeMillis();
+            tMoved = false;
+            return true;
+        }
+        if (act == MotionEvent.ACTION_MOVE) {
+            if (Math.abs(ev.getRawX() - tDownX) > dp((int) TAP_SLOP_DP)
+                    || Math.abs(ev.getRawY() - tDownY) > dp((int) TAP_SLOP_DP)) tMoved = true;
+            return true;
+        }
+        if (act == MotionEvent.ACTION_CANCEL) return true;
+        if (act == MotionEvent.ACTION_UP) {
+            float dx = ev.getRawX() - tDownX, dy = ev.getRawY() - tDownY;
+            float adx = Math.abs(dx), ady = Math.abs(dy);
+            long dur = System.currentTimeMillis() - tDownAt;
+            float swipeMin = dp((int) SWIPE_MIN_DP), slop = dp((int) TAP_SLOP_DP);
+            if (Math.max(adx, ady) > swipeMin) {
+                if (adx > ady) onLeftRight(dx < 0 ? 1 : -1);   // 左滑=下一个分类
+                else onUpDown(dy < 0 ? 1 : -1);                 // 上滑=下一个频道
+            } else if (!tMoved && Math.max(adx, ady) <= slop) {
+                if (dur >= LONG_PRESS_MS) onLongPress(ev);
+                else onTap(ev);
+            }
+            return true;
+        }
+        return super.dispatchTouchEvent(ev);
+    }
+
+    /** 判断一次点击是否落在某个可视 View 内（用屏幕绝对坐标，避免坐标系偏差） */
+    private boolean inView(View v, MotionEvent e) {
+        if (v == null || v.getVisibility() != View.VISIBLE) return false;
+        int[] loc = new int[2];
+        v.getLocationOnScreen(loc);
+        float x = e.getRawX(), y = e.getRawY();
+        return x >= loc[0] && x <= loc[0] + v.getWidth()
+                && y >= loc[1] && y <= loc[1] + v.getHeight();
+    }
+
+    private void onTap(MotionEvent e) {
+        if (!panelOpen) { openPanel(); return; }        // 点画面 → 弹面板
+        // 1) 工具行
+        for (int i = 0; i < 2; i++) {
+            if (inView(toolRows[i], e)) { toolSel = i; zone = 2; runTool(i); return; }
+        }
+        // 2) 分类行：只切分类，不关面板
+        for (int i = 0; i < CAT_ROWS; i++) {
+            if (catRowIdx[i] >= 0 && inView(catRows[i], e)) {
+                panelGrp = catRowIdx[i]; panelChan = 0; zone = 1; renderPanel(); return;
+            }
+        }
+        // 3) 频道行：直接换台并关闭面板
+        for (int i = 0; i < CHAN_ROWS; i++) {
+            if (chanRowIdx[i] >= 0 && inView(chanRows[i], e)) {
+                curGrp = panelGrp; curChan = chanRowIdx[i];
+                closePanel(); startChannel(); return;
+            }
+        }
+        // 4) 已展开的线路信息区域：点它不关面板（避免误关）
+        if (!infoHidden && infoBar != null && infoBar.getVisibility() == View.VISIBLE
+                && inView(infoBar, e)) return;
+        closePanel();                                   // 5) 点面板空白处 → 关闭
+    }
+
+    private void onLongPress(MotionEvent e) {
+        if (panelOpen) {
+            for (int i = 0; i < CHAN_ROWS; i++) {
+                if (chanRowIdx[i] >= 0 && inView(chanRows[i], e)) {
+                    toggleFav(panelGrp, chanRowIdx[i]); return;
+                }
+            }
+            toggleFav(panelGrp, panelChan);
+        } else {
+            toggleFav(curGrp, curChan);                 // 长按画面收藏当前播放频道
+        }
     }
 
     // ============================ 按键（前置拦截，完全不依赖网页） ============================
@@ -838,13 +1020,12 @@ public class MainActivity extends Activity {
                           panelOpen && zone == 1 ? panelChan : curChan);
                 break;
             case KeyEvent.KEYCODE_0:
-                infoHidden = !infoHidden;
-                infoBar.setAlpha(infoHidden ? 0f : 1f);
-                updateInfo();
+                // v2.0.1 兼容保留：老遥控器的 0 现在等同面板「线路信息」工具
+                runTool(1);
                 break;
             case KeyEvent.KEYCODE_9:
-                toast("重新加载当前频道");
-                startChannel();
+                // v2.0.1 兼容保留：老遥控器的 9 现在等同面板「重新加载」工具
+                runTool(0);
                 break;
             default:
                 // 数字 1-8 保留，暂不绑定动作
@@ -855,6 +1036,7 @@ public class MainActivity extends Activity {
     private void onOk() {
         if (!panelOpen) { openPanel(); return; }
         if (zone == 0) { zone = 1; renderPanel(); return; }
+        if (zone == 2) { runTool(toolSel); return; }   // v2.0.1：确定键触发工具条目
         Grp g = groups.get(panelGrp);
         if (g.chans.isEmpty()) { toast("该分类暂无频道"); return; }
         curGrp = panelGrp;
@@ -876,10 +1058,13 @@ public class MainActivity extends Activity {
             if (zone == 0) {
                 panelGrp = clamp(panelGrp + dir, 0, groups.size() - 1);
                 panelChan = 0;
-            } else {
+            } else if (zone == 1) {
                 Grp g = groups.get(panelGrp);
                 if (!g.chans.isEmpty())
                     panelChan = clamp(panelChan + dir, 0, g.chans.size() - 1);
+            } else {
+                // 工具栏：上下在两个工具条目间切换
+                toolSel = (toolSel + dir + 2) % 2;
             }
             renderPanel();
         } else {
@@ -893,7 +1078,7 @@ public class MainActivity extends Activity {
 
     private void onLeftRight(int dir) {
         if (panelOpen) {
-            zone = (dir < 0) ? 0 : 1;
+            zone = clamp(zone + dir, 0, 2);   // v2.0.1：分类栏 → 频道栏 → 工具栏
             renderPanel();
         } else {
             // 切分类并播该分类第一个频道（跳过空的收藏分类）
@@ -960,7 +1145,7 @@ public class MainActivity extends Activity {
                 + "地址：" + url + "\n"
                 + "数据：" + groups.size() + " 分类(含收藏) · " + totalChannels()
                 + " 频道 · " + totalLines() + " 线路 · " + sourceInfo + "\n"
-                + "操作：确定 选台 / ↑↓ 换台 / ←→ 分类 / 菜单 收藏 / 0 隐藏 / 9 重载");
+                + "操作：点画面/确定 开关面板 · ↑↓ 换台 · ←→ 切换 · 菜单/长按 收藏 · 底部工具 重载/信息");
     }
 
     // ============================ 在线更新（尽力而为，失败静默用内置表） ============================
