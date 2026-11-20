@@ -118,13 +118,13 @@ public class MainActivity extends Activity {
     private TextView coverTitle, coverTip, infoBar, osd, toast, errBar, catTitle, chanTitle;
     private final TextView[] catRows = new TextView[CAT_ROWS];
     private final TextView[] chanRows = new TextView[CHAN_ROWS];
-    private final TextView[] toolRows = new TextView[2];      // v2.0.1 面板底部工具条目
+    private final TextView[] toolRows = new TextView[2];      // 面板底部工具条目：重新加载 / 线路信息
     private final int[] catRowIdx = new int[CAT_ROWS];         // 每行当前对应的分类下标
     private final int[] chanRowIdx = new int[CHAN_ROWS];       // 每行当前对应的频道下标
 
     private SharedPreferences prefs;
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private String verName = "2.0.1", sourceInfo = "";
+    private String verName = "2.1.0", sourceInfo = "";
     private int videoW = 0, videoH = 0;
 
     // v2.0.1 触屏状态（纯 MotionEvent 手动判定，不依赖焦点系统）
@@ -386,7 +386,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView help = mkText(17f, 0xFF7E8CB0, false);
-        help.setText("点分类切台 / 点频道直接播 · 确定或点空白 开关面板 · 菜单或长按 收藏 · 上下滑换台 · 左右滑切分类 · 返回关闭");
+        help.setText("点分类切台 / 点频道直接播 · 确定或点空白 开关面板 · 菜单或长按 收藏 · 上下滑换台 · 左右滑切分类 · 画面自动铺满 · 返回关闭");
         help.setPadding(dp(10), dp(10), 0, 0);
         chanCol.addView(help);
         panel.addView(chanCol, new LinearLayout.LayoutParams(0,
@@ -401,18 +401,21 @@ public class MainActivity extends Activity {
                 getResources().getDisplayMetrics());
     }
 
-    /** FIT(contain)：完整显示不裁切；16:9 源在超宽屏两侧留等量黑边 */
+    /** 自动铺满(cover)：按视频宽高比放大裁切到满屏，保持比例不拉伸、不留黑边。
+     *  16:9 源正好铺满；4:3 等其它比例源自动裁掉超出部分，观感与主流直播 App 一致。 */
     private void applyVideoLayout() {
         if (root == null || surface == null) return;
         int cw = root.getWidth(), ch = root.getHeight();
         if (cw <= 0 || ch <= 0) return;
-        int w = cw, h = ch;
+        int w, h;
         if (videoW > 0 && videoH > 0) {
             float ar = (float) videoW / (float) videoH;
             if (ar <= 0f) ar = 16f / 9f;
-            w = cw;
-            h = (int) (cw / ar);
-            if (h > ch) { h = ch; w = (int) (ch * ar); }
+            // 铺满裁切(cover)：视频铺满屏幕，超出部分裁掉，保持比例不变形
+            w = Math.max(cw, (int) Math.ceil(ch * ar));
+            h = Math.max(ch, (int) Math.ceil(cw / ar));
+        } else {
+            w = cw; h = ch;   // 尺寸未知时先铺满，等 onVideoSizeChanged 再校正
         }
         if (w < 1) w = 1;
         if (h < 1) h = 1;
@@ -804,13 +807,13 @@ public class MainActivity extends Activity {
         if (panelOpen) renderPanel();
     }
 
-    /** v2.0.1：面板底部两个工具条目（手机点按 / 电视确定键共用） */
+    /** 面板底部两个工具条目（手机点按 / 电视确定键共用） */
     private void runTool(int which) {
         if (which == 0) {
             toast("重新加载当前频道");
             if (panelOpen) closePanel();
             startChannel();
-        } else {
+        } else if (which == 1) {
             if (!panelOpen) openPanel();
             toggleInfo();
         }
@@ -1145,6 +1148,7 @@ public class MainActivity extends Activity {
                 + "地址：" + url + "\n"
                 + "数据：" + groups.size() + " 分类(含收藏) · " + totalChannels()
                 + " 频道 · " + totalLines() + " 线路 · " + sourceInfo + "\n"
+                + "画面：自动铺满（保持比例、裁切黑边）\n"
                 + "操作：点画面/确定 开关面板 · ↑↓ 换台 · ←→ 切换 · 菜单/长按 收藏 · 底部工具 重载/信息");
     }
 
